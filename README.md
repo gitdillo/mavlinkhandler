@@ -1,10 +1,92 @@
-# mavlinkhandler
+# Reasoning
 
-First commit, if this does not destroy your computer and everything you have ever loved, consider yourself lucky.
+Easy to use software for communicating over mavlink.
 
-Only known dependency is pymavlink.
+Concept similar to Dronekit and MAVROS.
 
-Tested on kubuntu 20.04.3 LTS using python3
+Only dependency is pymavlink.
+
+Tested on kubuntu 20.04.3 LTS using python 3.8.10.
+
+
+# Description
+
+The basic object is `MavlinkHandler`, which encapsulates various useful objects and fields.
+
+Calling the MavlinkHandler's `connect()` method calls `mavutil.mavlink_connection()` and stores the returned connection object in MavlinkHandler's `connection` field.
+
+The basic internal workings are shown below:
+
+![image](https://user-images.githubusercontent.com/634778/155085846-06647c48-3c56-4c1e-a562-c5728157b868.png)
+
+MavlinkHandler contains a thread, accessed via its `mavlink_update_thread` field. This thread continuously monitors the connection, intercepting all incoming messages.
+
+MavlinkHandler contains a `MavlinkHistory` object, accessed via its `history` field. This history contains a `store_messsage()` method, which is called by the thread every time a message is received. Messages are classified by source, meaning a system ID and component ID pair.
+
+The history contains `SourceHistory` objects under its `source_histories` field.
+
+Each source history refers to one source (system:component) and stores incoming messages to a certain depth (controlled by its `history_depth`).
+
+Source histories are added every time a new source (system:component) appears in the incoming stream.
+
+So, left to its own devices, a MavlinkHandler will continuously update its list of source histories, classifying messages by source.
+
+# Usage
+
+To intercept incoming messages, write and attach hooks to the update thread, e.g.:
+
+```
+def heartbeat_printer(m):
+    if m.get_type() == 'HEARTBEAT':
+        print('Heartbeat from ' + str(m.get_srcSystem()) + ':' + str(m.get_srcComponent()))
+```
+
+and:
+
+```
+mh = MavlinkHandler()
+mh.mavlink_update_thread.add_hook(heartbeat_printer)
+```
+
+To remove a hook, use the thread's `remove_hook()` method.
+
+## Retrieving messages
+
+For getting messages out of the histories, use `get_message()`, `get_last_message()` and `get_next_message()`
+
+`get_message()` will fetch a message by system ID, component ID, message type and index (so you can retrieve older messages).
+
+`get_last_message()` is the same but only fetches the most recent message.
+
+`get_next_message()` is interesting because it can be set to blocking or non blocking. In its blocking version, it will return the message that fits the requirements or will time out returning None. If, however, it is set to the non blocking, it will immediately return a `MessageRequest` object (constructor accessible via the mavlink handler's `history`). This is an object conceptually similar to a Future, it has a `message` field which is initially set to `None`. It is up to the caller to keep monitoring it, as soon as an appropriate message is received, it will be accessible via this `message` field. Also, time of arrival of the message will be in the `message_timestamp` field.
+
+### Requests and Records
+
+Message requests are useful for intercepting future events. However, they can be limited in use since they expire after intercepting a single message. Internally, they add a hook to the update thread which they remove once their target has been received.
+
+A tool broader in its scope is the Record object, which will keep a list of all messages fitting the filtering criteria set in its constructor.
+
+For example, when expecting an ACK message from a source component, a naive approach might be to create a `MessageRequest` with the type and source as criteria. This approach, however, might run into problems if an unrelated ACK is received (which will make the request stop) or if the ACK is received too quickly, before the thread has had time to process the hook of the `MessageRequest`. A more thorough approach, is to start a `Record` before we send a message to the component and then process the resulting messages until the desired one appears.
+
+## Sending messages
+
+To send a message, first construct it using pymavlink's `...encode()` methods. These can be accessed via the mavlink handler's `connection.mav` field.
+
+Once created a message can be sent via the mavlink handler's `send_message()` method.
+
+### System ID and its preservation
+
+The mavlink handler's own system and component ID is set when calling its `connect()` method via args `source_system` and `source_component`.
+
+Messages sent via the handler's `send_message()` method will incorporate these identifiers. If these need to be changed, this can be done via the mavlink handler's `set_source()` method, which acts on the handler's `connection.mav.srcSystem` and `connection.mav.srcComponent` fields.
+
+Sometimes, it is necessary to preserve the IDs of a message, for example, when forwarding a message generated by another source. In this case, using the handler's `send_message()` method with arg `preserve_source=True` will send it as is.
+
+NOTE: for that to work, the message needs to have been packed and so, have a non empty `_msgbuf`. An exception seems to be `STATUSTEXT` messages, which apparently have empty `_msgbuf`. Current implementation creates a new `STATUSTEXT` message with the same text, alters the mavlink handler's own system and component ID, blocks sending other messages, sends the message and then restores the handler to its original state. This is a workaround since, ideally, source preservation should be happening at the level of pymavlink's `send()` method, which also packs a header in a message, even if the message has already been packed.
+
+# Examples
+
+To illustrate usage, some examples are included, currently `listener.py` and `initiator.py`. More examples will be added to illustrate Message Requests and Records.
 
 For a demo, **first** run `listener.py` in one terminal and **then**, in another terminal, run `initiator.py`
 
@@ -12,4 +94,6 @@ If you run in interactive mode (python -i ...), you can then use the `mh.send_me
 
 You can also make your own messages using the `mh.connection.mav.WHATEVER_encode(...)` and then send them across using `mh.send_message()`
 
-Quick and dirty tip, in the python console type `mh.connection.mav.` and then double tap Tab to see the ...encode methods.
+Quick and dirty tip, in the python console type `mh.connection.mav.` and then double tap Tab to see the `...encode` methods for every message type.
+
+
