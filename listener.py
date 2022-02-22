@@ -18,7 +18,7 @@ dialogue = ['My name is Sir Lancelot of Camelot.',
 
 
 
-def blip(m, mh):
+def blip(m):
     if m.get_type() == 'HEARTBEAT':
         print('Heartbeat from ' + str(m.get_srcSystem()) + ':' + str(m.get_srcComponent()))
     elif m.get_type() == 'STATUSTEXT':

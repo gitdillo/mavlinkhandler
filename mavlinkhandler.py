@@ -11,15 +11,6 @@ class TimeoutException(ErrorException):
     pass
 
 
-# Not used. Instead, we use optional args mavlink2 and dialect in the constructor of MavlinkHandler
-# def set_mavlink2():
-#     '''
-#     Sets mavutil to use MAVLINK2, ardupilotmega dialect
-#     '''
-#     os.environ['MAVLINK20'] = '1'
-#     mavutil.set_dialect('ardupilotmega')
-
-
 class SourceHistory(object):
     def __init__(self, history_depth=10, logger=None, source_system=None, source_component=None,
                  verbose_message_drop=False, verbose_new_messages=False):
@@ -143,6 +134,7 @@ class MavlinkHistory(object):
         self.logger = logger
         self.mavlink_update_thread = None
         self.message_request_list = []
+        self.record_list = []
         self.total_messages_received = 0
         self.total_messages_sent = 0
         self.verbose_message_drop = verbose_message_drop
@@ -171,7 +163,7 @@ class MavlinkHistory(object):
             doesn't. If it does, sets the message to this object's ".message" field, adds a timestamp in this object's
             ".message_timestamp" field and returns True.
             '''
-            # First, check if the message is filteredd out
+            # First, check if the message is filtered out
             if self.message_type is not None and not self.message_type == msg.get_type():
                 return False
             if self.system_id is not None and not msg.get_srcSystem() == self.system_id:
@@ -182,6 +174,44 @@ class MavlinkHistory(object):
             self.message = msg
             self.message_timestamp = time.time()
             return True
+
+    class Record(object):
+        '''
+        Similar to MessageRequest but instead of returning a single message, keeps a record of multiple messages.
+        '''
+        def __init__(self, message_type=None, system_id=None, component_id=None):
+            self.message_type = message_type
+            self.system_id = system_id
+            self.component_id = component_id
+            self.creation_timestamp = time.time()
+            self.message_list = []
+            self.isActive = False
+
+        def process_message(self, msg):
+            '''
+            Checks if the passed message meets the requirements and, if it does, adds it the record
+            '''
+            # Check if we have set message_type and it clashes
+            if self.message_type is not None and self.message_type != msg.get_type():
+                return
+            # Check if we have set system_id and it clashes
+            if self.system_id is not None and self.system_id != msg.get_srcSystem():
+                return
+            # Check if we have set component_id and it clashes
+            if self.component_id is not None and self.component_id != msg.get_srcComponent():
+                return
+
+            # Reaching here means the message checks out
+            self.message_list.append({'message': msg, 'timestamp': time.time()})
+
+    def add_record(self, message_type=None, system_id=None, component_id=None):
+        record = self.Record(message_type=message_type, system_id=system_id, component_id=component_id)
+        self.record_list.append(record)
+        return record
+
+    def remove_record(self, record):
+        if record in self.record_list:
+            self.record_list.remove(record)
 
     def add_message_request(self, message_request):
         self.message_request_list.append(message_request)
@@ -249,10 +279,15 @@ class MavlinkHistory(object):
         source_history.store_message(msg)
         self.total_messages_received += 1
 
+        # Pass the message by the request list
         for request in self.message_request_list:
             if request.message is None:
                 if request.check_message(msg):
                     self.remove_message_request(request)
+
+        # Pass the message by the record list
+        for record in self.record_list:
+            record.process_message(msg)
 
     def get_message(self, system_id, component_id, msg_type, msg_index=0, verbose=False):
         '''
@@ -383,8 +418,7 @@ class MavlinkHistory(object):
 
 class MavlinkUpdateThread(object):
 
-    def __init__(self, connection, logger=None, name='MavlinkUpdateThread', hook_list=[], update_loop_period_sec=0.01,
-                 mavlinkhandler_ref=None):
+    def __init__(self, connection, logger=None, name='MavlinkUpdateThread', hook_list=[], update_loop_period_sec=0.01):
 
         self.logger = logger
         self.name = name
@@ -397,8 +431,6 @@ class MavlinkUpdateThread(object):
         self.isRunning = False
         self.termflag = threading.Event()
         self.pauseflag = threading.Event()
-
-        self.mavlinkhandler_ref = mavlinkhandler_ref
 
     def add_hook(self, function):
         '''
@@ -506,11 +538,12 @@ class MavlinkUpdateThread(object):
                         print(s)
             else:
                 for function in self.hook_list:
-                    function(msg, self.mavlinkhandler_ref)
+                    function(msg)
 
             sleep_time = self.update_loop_period_sec - (time.time() - t_start)
             if sleep_time > 0:
                 time.sleep(sleep_time)
+
 
 class MavlinkHandler(object):
 
@@ -554,8 +587,7 @@ class MavlinkHandler(object):
                 else:
                     self.logger.info(s)
 
-        self.mavlink_update_thread = MavlinkUpdateThread(self.connection, logger=logger, name=name, hook_list=hook_list,
-                                                         mavlinkhandler_ref=self)
+        self.mavlink_update_thread = MavlinkUpdateThread(self.connection, logger=logger, name=name, hook_list=hook_list)
         if start_thread:
             self.mavlink_update_thread.start(verbose=verbose)
 
@@ -694,19 +726,6 @@ class MavlinkHandler(object):
             verbose (True): log events to this object's logger
             heartbeat_timeout_seconds (10): if this is not set None, this method will wait heartbeat_timeout_seconds for
                 a heartbeat to be received on the stream. If it doesn't get one, it will raise TimeoutException.
-
-        TODO: dragons below here
-             stream_timeout=20,
-                streamrate=5, message_notifier=None, attach_message_hook=True, attach_idle_hook=True)
-         # Use ArduPilot dialect and enforce MAVLink2 usage.
-         # Set some default streamrate.
-         # Add some default utility default hook that serve when receiving messages.
-         # This method will try to connect to input arg "connection_string".
-         # If no heartbeat is received within "heartbeat_timeout" it will raise a TimeoutException
-         # As soon as a heartbeat is received, it will set the Copter object's "target_system" and "target_component"
-         # fields to those identified in the mavlink stream.
-         # It will then request all data streams ( https://mavlink.io/en/messages/common.html#MAV_DATA_STREAM_ALL ) and
-         # set a streamrate. If this has not been achieved within "stream_timeout" it will raise a TimeoutException.
          """
 
         if self.mavlink2:
@@ -744,100 +763,7 @@ class MavlinkHandler(object):
             self.mavlink_update_thread.start(verbose=self.verbose_thread)
 
 
-        # We intercept heartbeats until we get one from an autopilot ( source component == 1 ) which is
-        # running APM ( mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA )
-        # if heartbeat_timeout_seconds is not None:
-        #     while True:
-        #         time_remaining = max(heartbeat_timeout_seconds - (time.time() - tstart), 0)
-        #         h = self.mav.wait_heartbeat(blocking=True, timeout=time_remaining)
-        #         if h is None:
-        #             raise TimeoutException("No heartbeat after " + str(heartbeat_timeout_seconds) + " seconds.")
-        #         if h.get_srcComponent() == 1 and h.autopilot == mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA:
-        #             break
-
-        # self.target_system = h.get_srcSystem()
-        # self.target_component = h.get_srcComponent()
-
-        #
-        # if verbose:
-        #     self.logger.info('Got a heartbeat:\n' + str(h) + '\nfrom system ' + str(self.target_system) + ', component ' + str(
-        #         self.target_component))
-        #     self.logger.info('Requesting all data streams')
-        #
-        # # Ask for all data streams
-        # tstart = time.time()
-        # while True:
-        #     if time.time() - tstart > stream_timeout:
-        #         raise TimeoutException("Request for all data streams failed.")
-        #     self.mav.mav.request_data_stream_send(
-        #         self.target_system,
-        #         self.target_component,
-        #         mavutil.mavlink.MAV_DATA_STREAM_ALL,
-        #         streamrate,
-        #         1)
-        #     m = self.mav.recv_match(type='SYSTEM_TIME',
-        #                             blocking=True,
-        #                             timeout=1)
-        #     if m is not None:
-        #         break
-        #
-        # self.logger.info('Data stream set, system time is: ' + str(m))
-        #
-        # if attach_message_hook:
-        #     self.mav.message_hooks.append(self.message_hook)
-        # if attach_idle_hook:
-        #     self.mav.idle_hooks.append(self.idle_hook)
-        # if message_notifier is not None:
-        #     self.mav.message_hooks.append(message_notifier)
-
-
-
-
-
-
-
-
-
-
-
-    # def connect_to_mavlink_stream(self, verbose=True, heartbeat_timeout=10, stream_timeout=20, streamrate=5,
-    #                               start_update_thread=True, attach_message_hook=False, attach_idle_hook=False,
-    #                               baudrate=None, update_thread_verbose=True):
-    #     if self.connection_string is None:
-    #         raise ValueError(self.name + ': cannot connect because connection_string not set')
-    #
-    #     # The following line can throw TimeoutException
-    #     self.copter.connect(connection_string=self.connection_string, verbose=verbose,
-    #                         heartbeat_timeout=heartbeat_timeout, stream_timeout=stream_timeout, streamrate=streamrate,
-    #                         message_notifier=self.message_notifier, attach_message_hook=attach_message_hook,
-    #                         attach_idle_hook=attach_idle_hook)
-    #     self.set_state('CONNECTED')
-    #
-    #     if start_update_thread:
-    #         self.start_mavlink_update_thread(verbose=update_thread_verbose)
-
-
-
 if __name__ == "__main__":
 
     mh = MavlinkHandler(connection_string='udpin:localhost:14550')
     mh.connect(start_update_thread=True, verbose=False)
-
-    # def blip(m):
-    #     print(m.get_type())
-
-    # mh.mavlink_update_thread.add_hook(blip)
-
-    # print(1)
-    # h = mh.mav.wait_heartbeat()
-    # print(2)
-    # mh.history.store_message(h)
-    # print(3)
-    # h = mh.mav.wait_heartbeat()
-    # print(4)
-    # mh.history.store_message(h)
-    #
-    # mh.history.source_histories[0].get_message('HEARTBEAT')
-    #
-    # mh.history.get_last_message('HEARTBEAT')
-    # mh.attach_mavlink_update_thread(start_thread=True, hook_list=[blip])
