@@ -88,7 +88,9 @@ NOTE: for that to work, the message needs to have been packed and so, have a non
 
 To illustrate usage, some examples are included, currently `listener.py` and `initiator.py`. More examples will be added to illustrate Message Requests and Records.
 
-For a demo, **first** run `listener.py` in one terminal and **then**, in another terminal, run `initiator.py`
+## Chat demo
+
+**First** run `listener.py` in one terminal and **then**, in another terminal, run `initiator.py`
 
 If you run in interactive mode (python -i ...), you can then use the `mh.send_message()` to send existing messages (there is a heartbeat named `h` lying about so `mh.send_message(h)` will work).
 
