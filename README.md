@@ -98,4 +98,7 @@ You can also make your own messages using the `mh.connection.mav.WHATEVER_encode
 
 Quick and dirty tip, in the python console type `mh.connection.mav.` and then double tap Tab to see the `...encode` methods for every message type.
 
+## Contrarian vehicle
+
+Run `contrarian_vehicle.py` and `optimistic_GCS.py` in separate terminals (doesn't matter which one runs first). The "vehicle" only sends heartbeats and refuses to arm by sending appropriate COMMAND_ACK to arm requests. The GCS will try to arm the vehicle by sending it an arm request in a COMMAND_LONG.
 
