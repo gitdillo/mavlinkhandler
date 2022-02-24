@@ -84,16 +84,4 @@ Sometimes, it is necessary to preserve the IDs of a message, for example, when f
 
 NOTE: for that to work, the message needs to have been packed and so, have a non empty `_msgbuf`. An exception seems to be `STATUSTEXT` messages, which apparently have empty `_msgbuf`. Current implementation creates a new `STATUSTEXT` message with the same text, alters the mavlink handler's own system and component ID, blocks sending other messages, sends the message and then restores the handler to its original state. This is a workaround since, ideally, source preservation should be happening at the level of pymavlink's `send()` method, which also packs a header in a message, even if the message has already been packed.
 
-# Examples
-
-To illustrate usage, some examples are included, currently `listener.py` and `initiator.py`. More examples will be added to illustrate Message Requests and Records.
-
-For a demo, **first** run `listener.py` in one terminal and **then**, in another terminal, run `initiator.py`
-
-If you run in interactive mode (python -i ...), you can then use the `mh.send_message()` to send existing messages (there is a heartbeat named `h` lying about so `mh.send_message(h)` will work).
-
-You can also make your own messages using the `mh.connection.mav.WHATEVER_encode(...)` and then send them across using `mh.send_message()`
-
-Quick and dirty tip, in the python console type `mh.connection.mav.` and then double tap Tab to see the `...encode` methods for every message type.
-
 
