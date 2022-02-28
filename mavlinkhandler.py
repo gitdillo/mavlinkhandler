@@ -591,14 +591,38 @@ class MavlinkHandler(object):
         if start_thread:
             self.mavlink_update_thread.start(verbose=verbose)
 
-    def set_source(self, system_id, component_id):
+    def set_system_id(self, system_id):
         '''
         If connection (field .mav of this mav) has been initialised (via this object's connect() method), sets its
-        .srcSystem / .srcComponent fields to the passed ids
+        .srcSystem field to the passed id
         '''
         if self.connection is not None:
             self.connection.mav.srcSystem = system_id
+
+    def set_component_id(self, component_id):
+        '''
+        If connection (field .mav of this mav) has been initialised (via this object's connect() method), sets its
+        .srcComponent fields to the passed id
+        '''
+        if self.connection is not None:
             self.connection.mav.srcComponent = component_id
+
+    def get_system_id(self):
+        '''
+        If connection (field .mav of this mav) has been initialised (via this object's connect() method), return its
+        .srcSystem field
+        '''
+        if self.connection is not None:
+            return self.connection.mav.srcSystem
+
+    def get_component_id(self):
+        '''
+        If connection (field .mav of this mav) has been initialised (via this object's connect() method), return its
+        .srcComponent field
+        '''
+        if self.connection is not None:
+            return self.connection.mav.srcComponent
+
 
 
     def send_message(self, message, preserve_source=False, verbose=True,
@@ -650,12 +674,15 @@ class MavlinkHandler(object):
             # modifying our connection. This can result in source mixup if this method is accessed simultaneously by
             # different callers, which is why we need to use self.altered_source flag
             if message._msgbuf is None and message.get_type() == 'STATUSTEXT':
-                original_source = (self.connection.mav.srcSystem, self.connection.mav.srcComponent)
+                original_system_id = self.get_system_id()
+                original_component_id = self.get_component_id()
                 self.altered_source = True      # signal that we are transmitting with different source ids
-                self.set_source(message.get_srcSystem(), message.get_srcComponent())
+                self.set_system_id(message.get_srcSystem())
+                self.set_component_id(message.get_srcComponent())
                 self.connection.mav.send(message)
                 self.connection.mav.seq = (self.connection.mav.seq - 1) % 256   # restore the seq incremented by self.connection.mav.seq
-                self.set_source(original_source[0], original_source[1])
+                self.set_system_id(original_system_id)
+                self.set_component_id(original_component_id)
                 self.altered_source = False  # signal that we have finished sending with different source ids
             else:
                 # In this case, we have a non STATUS_TEXT message so we use the code from ardupilotmega.py,
@@ -671,10 +698,10 @@ class MavlinkHandler(object):
             self.connection.mav.send(message)
         self.history.total_messages_sent += 1
 
-    def setup_connection(self, connection_string=None, baud=None, source_system=255, source_component=0,
-                         planner_format=None, write=False, append=False, robust_parsing=True, notimestamps=False,
-                         input=True, dialect=None, autoreconnect=False, zero_time_base=False, retries=3,
-                         use_native=False, force_connected=False, progress_callback=None, verbose=True):
+    def setup_connection(self, connection_string, baud, source_system, source_component,
+                         planner_format, write, append, robust_parsing, notimestamps,
+                         input, dialect, autoreconnect, zero_time_base, retries,
+                         use_native, force_connected, progress_callback, verbose):
         '''
         Do not use directly, rather use connect() which calls this one.
         '''
@@ -707,13 +734,12 @@ class MavlinkHandler(object):
             else:
                 print(s)
 
-    def connect(self, connection_string=None, baud=None, source_system=255, source_component=0,
+
+    def connect(self, connection_string=None, baud=None, source_system=None, source_component=None,
                 planner_format=None, write=False, append=False, robust_parsing=True, notimestamps=False,
-                input=True, dialect='ardupilotmega', autoreconnect=True, zero_time_base=False, use_native=False,
-                force_connected=False, progress_callback=None, verbose=True, start_update_thread=True,
-                thread_hook_list=[],
-                heartbeat_timeout_seconds=10, stream_timeout=20,
-                streamrate=5, message_notifier=None, attach_message_hook=True, attach_idle_hook=True):
+                input=True, dialect='ardupilotmega', autoreconnect=True, zero_time_base=False, retries=3,
+                use_native=False, force_connected=False, progress_callback=None, verbose=True, start_update_thread=True,
+                thread_hook_list=[]):
         """Connect to a mavlink stream.
         Optional arguments which are present in mavutil.mavlink_connection() are transparently passed through to it.
 
@@ -728,17 +754,47 @@ class MavlinkHandler(object):
                 a heartbeat to be received on the stream. If it doesn't get one, it will raise TimeoutException.
          """
 
+        # Massage the inputs into reasonable values
+
+        # Connection string is definitely needed so let's hope we got it passed now or got it through the constructor
+        if connection_string is not None:
+            self.connection_string = connection_string
+        elif self.connection_string is None:
+            raise ValueError('No connection provided to connect() or set in the constructor of MavlinkHandler')
+
+        # System and component id are not necessary but if not passed, will be set to 0 by mavutil.mavlink_connection()
+        # Warn the user of potential for idiocy irrespective of verbosity
+        missing=[]
+        if source_system is None:
+            missing.append('source_system')
+        if source_component is None:
+            missing.append('source_component')
+        if missing:
+            s = '*** WARNING: ' + str(self.name) + ': Not provided: '
+            s += missing[0]
+            # Try our luck adding a second missing item
+            try:
+                s += ', ' + missing[1]
+            except IndexError:
+                pass
+            s += '. Will set to 0 but this is bad practice. Set to correct values to avoid seeing this message. ***'
+            if self.logger is not None:
+                self.logger.info(s)
+            else:
+                print(s)
+
+
+
+
+        # For all other args, we can use defaults and hope for the best
+        if baud is not None:
+            self.baud = baud
+
         if self.mavlink2:
             os.environ['MAVLINK20'] = '1'
 
         self.dialect = dialect
         mavutil.set_dialect(self.dialect)
-
-        if connection_string is not None:
-            self.connection_string = connection_string
-
-        if baud is not None:
-            self.baud = baud
 
         if verbose:
             s = 'Attempting connection to: ' + self.connection_string
@@ -747,19 +803,34 @@ class MavlinkHandler(object):
             else:
                 print(s)
 
-        # Note that this will set self.connection
-        self.setup_connection(connection_string=self.connection_string, baud=self.baud, source_system=source_system,
-                              source_component=source_component, planner_format=planner_format, write=write,
-                              append=append, robust_parsing=robust_parsing, notimestamps=notimestamps, input=input,
-                              dialect=dialect, autoreconnect=autoreconnect, zero_time_base=zero_time_base, retries=3,
-                              use_native=use_native, force_connected=force_connected,
-                              progress_callback=progress_callback, verbose=verbose)
+        self.setup_connection(
+            connection_string=self.connection_string,
+            baud=self.baud,
+            source_system=source_system,
+            source_component=source_component,
+            planner_format=planner_format,
+            write=write,
+            append=append,
+            robust_parsing=robust_parsing,
+            notimestamps=notimestamps,
+            input=input,
+            dialect=dialect,
+            autoreconnect=autoreconnect,
+            zero_time_base=zero_time_base,
+            retries=retries,
+            use_native=use_native,
+            force_connected=force_connected,
+            progress_callback=progress_callback,
+            verbose=verbose
+        )
 
         # We now have set self.connection to the connection so we can pass its reference to this object's mavlink update thread
         self.mavlink_update_thread.connection = self.connection
 
         # If we are supposed to start the thread, this is an awesome time to do so
         if start_update_thread:
+            for hook in thread_hook_list:                   # add any passed hooks before starting the thread
+                self.mavlink_update_thread.add_hook(hook)
             self.mavlink_update_thread.start(verbose=self.verbose_thread)
 
 
