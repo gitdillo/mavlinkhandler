@@ -1,6 +1,6 @@
 from pymavlink import mavutil
 import time
-from mavlinkhandler import MavlinkHandler
+from mavlinkhandler import MavlinkHandler, TimeoutException
 
 class AutopilotHandler(object):
     '''
@@ -11,10 +11,17 @@ class AutopilotHandler(object):
     '''
     def __init__(self, autopilot_connection_string, system_id=None, component_id=None):
         self.autopilot_mavlink_handler = MavlinkHandler()
+        self.autopilot_mavlink_handler.mavlink_update_thread.add_hook(self.update_fields)
+
         self.autopilot_mavlink_handler.connect(connection_string=autopilot_connection_string, start_update_thread=True,
                                                source_system=system_id, source_component=component_id)
 
-        # Fields below are updated in update_fields
+        # Stuff we will read off the autopilot once we hear from it
+        self.autopilot_system_id = None     # System ID, set by the autopilot onboard the vehicle
+        self.autopilot_component_id = None  # https://mavlink.io/en/messages/common.html#MAV_COMPONENT should be 1 for autopilot
+        self.autopilot_class = None         # https://mavlink.io/en/messages/common.html#MAV_AUTOPILOT
+
+        # Fields below are automatically updated in update_fields() by our mavlink_update_thread
         self.armed = None
         self.mode = None
         self.mav_state = None
@@ -34,6 +41,17 @@ class AutopilotHandler(object):
         self.battery_energy_consumed_hJ = None
         self.battery_time_remaining_sec = None
         self.battery_charge_state = None
+        self.current_mission_item = None
+        self.current_mission_item_timestamp = None
+        self.last_reached_mission_item = None
+        self._last_reached_mission_item_timestamp = None
+        self.target_location_latitude = None
+        self.target_location_longitude = None
+        self.target_location_alt_abs = None
+        self.GPS_status_satellites_visible = None
+        self.GPS_status_time_usec = None
+        self.GPS_status_fix_type = None
+        self.GPS_status_fix_type_description = None
 
     def update_fields(self, message):
         '''
@@ -76,7 +94,7 @@ class AutopilotHandler(object):
             else:
                 self.mav_state = 'MAV_STATE_UNINIT'
             if not old_state == self.mav_state:
-                self.logger.info(str(self.name) + ': state changed to: ' + str(self.mav_state))
+                print('State changed to: ' + str(self.mav_state))
             return
 
         # SYSTEM_TIME gives GPS time
@@ -129,6 +147,219 @@ class AutopilotHandler(object):
                 self.battery_charge_state = 'MAV_BATTERY_CHARGE_STATE_UNDEFINED'
             return
 
+        # MISSION_CURRENT tells us about our current mission waypoint
+        if message.get_type() == 'MISSION_CURRENT':
+            if not self.current_mission_item == message.seq:
+                self.current_mission_item = message.seq
+                self.current_mission_item_timestamp = time.time()
+                print('Current mission item: ' + str(self.current_mission_item))
+            return
+
+        # MISSION_ITEM_REACHED tells us about the last reached mission item
+        if message.get_type() == 'MISSION_ITEM_REACHED':
+            if not self.last_reached_mission_item == message.seq:
+                self.last_reached_mission_item = message.seq
+                self._last_reached_mission_item_timestamp = time.time()
+                print('Reached mission item: ' + str(self._last_reached_mission_item['number']))
+            return
+
+        # POSITION_TARGET_GLOBAL_INT tells us about our target position (when we have one)
+        if message.get_type() == 'POSITION_TARGET_GLOBAL_INT':
+            self.target_location_latitude = message.lat_int * 1e-7
+            self.target_location_longitude = message.lon_int * 1e-7
+            self.target_location_alt_abs = message.alt
+            return
+
+        # GPS_RAW_INT tells us about GPS stuff
+        if message.get_type() == 'GPS_RAW_INT':
+            self.GPS_status_satellites_visible = message.satellites_visible
+            self.GPS_status_time_usec = message.time_usec
+            self.GPS_status_fix_type = message.fix_type  # See https://mavlink.io/en/messages/common.html#GPS_FIX_TYPE
+            if self.GPS_status_fix_type == mavutil.mavlink.GPS_FIX_TYPE_NO_GPS:
+                self.GPS_status_fix_type_description = 'NO_GPS'
+            elif self.GPS_status_fix_type == mavutil.mavlink.GPS_FIX_TYPE_NO_FIX:
+                self.GPS_status_fix_type_description = 'NO_FIX'
+            elif self.GPS_status_fix_type == mavutil.mavlink.GPS_FIX_TYPE_2D_FIX:
+                self.GPS_status_fix_type_description = '2D_FIX'
+            elif self.GPS_status_fix_type == mavutil.mavlink.GPS_FIX_TYPE_3D_FIX:
+                self.GPS_status_fix_type_description = '3D_FIX'
+            elif self.GPS_status_fix_type == mavutil.mavlink.GPS_FIX_TYPE_DGPS:
+                self.GPS_status_fix_type_description = 'DGPS'
+            elif self.GPS_status_fix_type == mavutil.mavlink.GPS_FIX_TYPE_RTK_FLOAT:
+                self.GPS_status_fix_type_description = 'RTK_FLOAT'
+            elif self.GPS_status_fix_type == mavutil.mavlink.GPS_FIX_TYPE_RTK_FIXED:
+                self.GPS_status_fix_type_description = 'RTK_FIXED'
+            elif self.GPS_status_fix_type == mavutil.mavlink.GPS_FIX_TYPE_STATIC:
+                self.GPS_status_fix_type_description = 'STATIC'
+            elif self.GPS_status_fix_type == mavutil.mavlink.GPS_FIX_TYPE_PPP:
+                self.GPS_status_fix_type_description = 'PPP'
+            else:
+                self.GPS_status_fix_type_description = 'Unknown'
+
+
+    def _arm_disarm(self, arm=True, force=False, verbose=False, retries=10, timeout=5, wait_loop_sleep_period=1,
+                    command_long_timeout=0.5):
+
+        if arm:  # Request is to arm
+            if force:
+                params = [1, 21196, 0, 0, 0, 0, 0]
+            else:
+                params = [1, 0, 0, 0, 0, 0, 0]
+        else:  # Request is to disarm
+            if force:
+                params = [0, 21196, 0, 0, 0, 0, 0]
+            else:
+                params = [0, 0, 0, 0, 0, 0, 0]
+
+        response = False
+        retry = False
+        t0 = time.time()
+        retry_counter = 0
+        while not response:
+            if time.time() - t0 > timeout:
+                raise TimeoutException('ERROR in _arm_disarm(): timeout without positive response')
+            if retry_counter > retries:
+                raise TimeoutException('ERROR in _arm_disarm(): max retries without positive response')
+
+            # We might have armed / disarmed but missed the positive response, handle this here
+            if arm:
+                if self.armed:
+                    if verbose:
+                        print('_arm_disarm(): ACK not received but vehicle armed successfully')
+                    return True
+            else:
+                if not self.armed:
+                    if verbose:
+                        print(': _arm_disarm(): ACK not received but vehicle disarmed successfully')
+                    return True
+
+        #     try:
+        #         if retry:
+        #             retry_counter += 1
+        #             if verbose:
+        #                 self.logger.info(str(self.name) + ': _arm_disarm(): resending command')
+        #         response = self.run_command_long(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, params,
+        #                                          timeout_sec=command_long_timeout, verbose=verbose)
+        #     except TimeoutException as te:
+        #         if verbose:
+        #             self.logger.info(str(self.name) + ': _arm_disarm(): timeout in run_command_long(): ' + str(te))
+        #         retry = True
+        #     except ValueError as ve:
+        #         # In this case our request got rejected by the FCU
+        #         self.logger.info(str(self.name) + ': _arm_disarm(): FCU rejection at run_command_long():\n' + str(ve))
+        #         return False
+        #
+        #     time.sleep(wait_loop_sleep_period)
+        #
+        # if verbose:
+        #     if arm:
+        #         s = 'arming'
+        #     else:
+        #         s = 'disarming'
+        #     self.logger.info(str(self.name) + ': _arm_disarm(): successful ' + s)
+        # return response
+
+    def run_command_long(self, command, params, expected_result=mavutil.mavlink.MAV_RESULT_ACCEPTED, timeout_sec=5.0,
+                         verbose=True, wait_loop_sleep_period_sec=0.01, target_system=None, target_component=None,
+                         confirmation=0):
+
+        if not len(params) == 7:
+            raise TypeError('params arg has to be a list of 7 items, '
+                            'see:\nhttps://mavlink.io/en/messages/common.html#COMMAND_LONG')
+
+        if target_system is None:
+            target_system = self.autopilot_system_id
+
+        if target_component is None:
+            target_component = self.autopilot_component_id
+
+        cmd = self.autopilot_mavlink_handler.connection.mav.command_long_encode(target_system,
+                                                                              target_component,
+                                                                              command,
+                                                                              confirmation,
+                                                                              params[0],
+                                                                              params[1],
+                                                                              params[2],
+                                                                              params[3],
+                                                                              params[4],
+                                                                              params[5],
+                                                                              params[6],
+                                                                              )
+        t0 = time.time()
+        # Start recording for COMMAND_ACK
+        record = self.autopilot_mavlink_handler.history.add_record(message_type='COMMAND_ACK',
+                                                                 system_id=self.autopilot_system_id,
+                                                                 component_id=self.autopilot_component_id)
+        # self.autopilot_mavlink_handler.connection.mav.send(cmd)
+        self.autopilot_mavlink_handler.send_message(cmd)
+        # ack = None
+        # recv_time = None
+        # while ack is None:
+        #     if time.time() - t0 > timeout_sec:
+        #         error_string = str(self.name) + ': timeout while waiting for COMMAND_ACK running command ' + str(
+        #             command)
+        #         if verbose:
+        #             self.logger.info(error_string)
+        #         self.vehicle_mavlink_handler.history.remove_record(record)
+        #         raise TimeoutException(error_string)
+        #
+        #     # Let's see what we have accumulated in our COMMAND_ACK record so far
+        #     for r in record.message_list:
+        #         if r['message'].command == command:  # if this is True, we have an ACK to our command
+        #             ack = r['message']
+        #             recv_time = r['timestamp']
+        #             break
+        #
+        #     time.sleep(wait_loop_sleep_period_sec)
+        #
+        # # Reaching here means we have a legit COMMAND_ACK in "ack"
+        # if ack.result == expected_result:
+        #     if verbose:
+        #         self.logger.info('%s: got successful ACK: %s in %.4f seconds' % (
+        #             self.name, mavutil.mavlink.enums["MAV_RESULT"][ack.result].name,
+        #             recv_time - t0))
+        #     self.vehicle_mavlink_handler.history.remove_record(record)
+        #     return ack, recv_time
+        # else:
+        #     error_string = "%s: Expected %s got %s\nDescription:\n%s" % (
+        #         self.name,
+        #         mavutil.mavlink.enums["MAV_RESULT"][expected_result].name,
+        #         mavutil.mavlink.enums["MAV_RESULT"][ack.result].name,
+        #         mavutil.mavlink.enums["MAV_RESULT"][ack.result].description
+        #     )
+        #     if verbose:
+        #         self.logger.info(error_string)
+        #     self.vehicle_mavlink_handler.history.remove_record(record)
+        #     raise ValueError(error_string)
+
+    def identify_autopilot(self, wait_loop_period_sec=0.01):
+        '''
+        Waits for a HEARTBEAT from a component identifying as mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1
+        Sets fields autopilot_system_id, autopilot_component_id, autopilot_class accordingly.
+        '''
+
+        # Grab a HEARTBEAT from a component identifying as mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1
+        # Set blocking=False to get get_next_message() to return a MessageRequest object
+        heartbeat_request = ah.autopilot_mavlink_handler.history.get_next_message(
+            message_type='HEARTBEAT', component_id=mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1, blocking=False)
+
+        print('Blocking until we receive a heartbeat from an autopilot')
+        while heartbeat_request.message is None:    # message will stop being None when an appropriate message arrives
+            time.sleep(wait_loop_period_sec)
+
+        self.autopilot_system_id = heartbeat_request.message.get_srcSystem()
+        self.autopilot_component_id = heartbeat_request.message.get_srcComponent()
+        self.autopilot_class = heartbeat_request.message.autopilot
+
+        # We need to set this or we cannot send messages !!!
+        self.autopilot_mavlink_handler.set_system_id(self.autopilot_system_id)
+
+        # Reaching here means we have heartbeat from something identifying as an autopilot in heartbeat_request.message
+        # print('Got HEARTBEAT from:\nSystem: ' + str(heartbeat_request.message.get_s))
+        print('\nIdentified autopilot with:\nSystem ID: ' + str(self.autopilot_system_id) + '\nComponent ID: ' + str(
+            self.autopilot_component_id) + '\nAutopilot class (MAV_AUTOPILOT): ' + str(self.autopilot_class) + '\n')
+
+
 
 
 # Connection related stuff
@@ -136,17 +367,12 @@ connection_string = 'udpin:localhost:14550'
 component_id = 191  # companion computer but not enumerated in mavutil, see: https://mavlink.io/en/messages/common.html#MAV_COMP_ID_ONBOARD_COMPUTER
 
 
+# NOTE: by NOT providing a system id below, we cannot send messages until our system id is set. This is done by calling
+# identify_autopilot() which sets system id to that of the first received HEARTBEAT from an autopilot.
+# If we had wanted to send messages by setting our own system id, we should provide kwarg system_id= below
 ah = AutopilotHandler(connection_string, component_id=component_id)
+ah.identify_autopilot()
 
-# Let's wait for a message from an autopilot and grab its system id.
-# We will use it as our own system ID since we 'd like to believe we are companion computer onboard a vehicle
-while True:
-    print('Patiently waiting for any mavlink message from an autopilot')
-    # We need messages from autopilots: mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1 (value is 1)
-    msg = ah.autopilot_mavlink_handler.history.get_next_message(component_id=mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1,
-                                                              timeout_sec=10)
-    if msg is not None:     # we got a message from a component identifying as an autopilot
-        ah.autopilot_mavlink_handler.set_system_id(msg.get_srcSystem())     # set our system id to that of the message
-        print(
-            'Got: ' + str(msg.get_type()) + ', set system id to ' + str(ah.autopilot_mavlink_handler.get_system_id()))
-        break
+params = [1, 0, 0, 0, 0, 0, 0]
+cmd = mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM
+ah.run_command_long(cmd, params)
