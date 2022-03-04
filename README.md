@@ -102,3 +102,29 @@ Quick and dirty tip, in the python console type `mh.connection.mav.` and then do
 
 Run `contrarian_vehicle.py` and `optimistic_GCS.py` in separate terminals (doesn't matter which one runs first). The "vehicle" only sends heartbeats and refuses to arm by sending appropriate COMMAND_ACK to arm requests. The GCS will try to arm the vehicle by sending it an arm request in a COMMAND_LONG.
 
+## Autopilot handler
+
+This is a fairly extensive example, highlighting many uses. It is supposed to be used either running on a companion computer connected to an autopilot or, perhaps, as part of a GCS.
+
+It introduces a class `AutopilotHandler`, which contains a mavlink handler connected to a MAVLink stream. The mavlink handler, continuously updates various fields of the autopilot handler as messages come through (e.g. field `.armed` will always contain the armed state as reported by the HEARTBEAT message). This is done by method `update_fields()`, which is added as a hook to the mavlink handler's update thread by the constructor of `AutopilotHandler`.
+
+This example also highlights an implementation of an interactive transaction between components: sending a message and intercepting a result. At the level of `MavlinkHandler` this is done by method `send_get_response()`, which sends a message and listens for a result.
+
+At the level of `AutopilotHandler`, `send_get_response()` is used to create a straighforward implementation of running a [COMMAND_LONG](https://mavlink.io/en/messages/common.html#COMMAND_LONG) in `run_command_long()`.
+
+Finally, running a `COMMAND_LONG` is demonstrated by using it to arm and disarm the vehicle in methods: `arm()`, `disarm()` and `_arm_disarm()`.
+
+### To run
+
+Start a simulated or real vehicle, sending a mavlink stream as udp to port 14550.
+
+Run: `python3 -i autopilot_handler.py`
+
+If the vehicle is ready to arm, it will arm, if not, it will refuse (do be careful if you have connected a real vehicle).
+
+If you are running in interactive mode, you will have a variable `ah` of type `AutopilotHandler` which you can use to issue further commands (try `arm()` or `disarm()`). You can also try any COMMAND_LONG by using `run_command_long()`, for example, a disarm command is:
+`ah.run_command_long(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, [0,0,0,0,0,0,0])`
+
+or
+
+`ah.run_command_long(400, [0,0,0,0,0,0,0])` for short.

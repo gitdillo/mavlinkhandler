@@ -24,37 +24,37 @@ def blip(m):
     elif m.get_type() == 'STATUSTEXT':
         print('====> ' + m.text)
 
+if __name__ == "__main__":
+
+    mh = MavlinkHandler()
+    mh.mavlink_update_thread.add_hook(blip)     # add our hook to our mavlink update thread
+    mh.connect(connection_string=connection_string, source_system=my_system_id, source_component=my_component_id, start_update_thread=True)
 
 
-mh = MavlinkHandler()
-mh.mavlink_update_thread.add_hook(blip)     # add our hook to our mavlink update thread
-mh.connect(connection_string=connection_string, source_system=my_system_id, source_component=my_component_id, start_update_thread=True)
+    # Let's twiddle our thumbs till we hear a heartbeat
+    print('Patiently waiting for a heartbeat')
+    while True:
+        h = mh.history.wait_heartbeat(timeout_sec=5)
+        if h is None:
+            print("Don't mind me, I 'm fine, really, sitting here, all alone, waiting for a heartbeat...")
+        else:
+            # Let's encode a HEARTBEAT
+            h = mh.connection.mav.heartbeat_encode(mavutil.mavlink.MAV_TYPE_QUADROTOR,
+                                                   mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA, 0, 0, 0)
+            print('Responding with a heartbeat of our own')
+            mh.send_message(h)
+            break
 
-
-# Let's twiddle our thumbs till we hear a heartbeat
-print('Patiently waiting for a heartbeat')
-while True:
-    h = mh.history.wait_heartbeat(timeout_sec=5)
-    if h is None:
-        print("Don't mind me, I 'm fine, really, sitting here, all alone, waiting for a heartbeat...")
-    else:
-        # Let's encode a HEARTBEAT
-        h = mh.connection.mav.heartbeat_encode(mavutil.mavlink.MAV_TYPE_QUADROTOR,
-                                               mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA, 0, 0, 0)
-        print('Responding with a heartbeat of our own')
-        mh.send_message(h)
-        break
-
-# Reaching here means the other side will hit us with their side of the dialogue so let's listen for it
-dialogue_counter = 0
-while True:
-    s = mh.history.get_next_message('STATUSTEXT', timeout_sec=5)
-    if s is None:
-        print('The other side seems to have dropped out of the conversation')
-        break
-    time.sleep(1)   # wait a bit before answering
-    s = mh.connection.mav.statustext_encode(mavutil.mavlink.MAV_SEVERITY_INFO,
-                                            bytes(dialogue[dialogue_counter], 'ascii'))
-    print('<==== ' + s.text.decode('ascii'))    # Print what we are sending
-    mh.send_message(s)
-    dialogue_counter += 1
+    # Reaching here means the other side will hit us with their side of the dialogue so let's listen for it
+    dialogue_counter = 0
+    while True:
+        s = mh.history.get_next_message('STATUSTEXT', timeout_sec=5)
+        if s is None:
+            print('The other side seems to have dropped out of the conversation')
+            break
+        time.sleep(1)   # wait a bit before answering
+        s = mh.connection.mav.statustext_encode(mavutil.mavlink.MAV_SEVERITY_INFO,
+                                                bytes(dialogue[dialogue_counter], 'ascii'))
+        print('<==== ' + s.text.decode('ascii'))    # Print what we are sending
+        mh.send_message(s)
+        dialogue_counter += 1

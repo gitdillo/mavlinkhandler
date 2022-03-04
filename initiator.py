@@ -21,30 +21,31 @@ def blip(m):
     elif m.get_type() == 'STATUSTEXT':
         print('====> ' + m.text)
 
+if __name__ == "__main__":
 
-mh = MavlinkHandler()
-mh.mavlink_update_thread.add_hook(blip)
-mh.connect(connection_string=connection_string, source_system=my_system_id, source_component=my_component_id, start_update_thread=True)
+    mh = MavlinkHandler()
+    mh.mavlink_update_thread.add_hook(blip)
+    mh.connect(connection_string=connection_string, source_system=my_system_id, source_component=my_component_id, start_update_thread=True)
 
 
-# Let's encode a HEARTBEAT
-# Our MavlinkHandler object gives us access to pymavlink's xxx_encode() methods via its .connection.mav field
-h = mh.connection.mav.heartbeat_encode(mavutil.mavlink.MAV_TYPE_QUADROTOR, mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA, 0, 0, 0)
+    # Let's encode a HEARTBEAT
+    # Our MavlinkHandler object gives us access to pymavlink's xxx_encode() methods via its .connection.mav field
+    h = mh.connection.mav.heartbeat_encode(mavutil.mavlink.MAV_TYPE_QUADROTOR, mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA, 0, 0, 0)
 
-# Send the heartbeat to the other party (assumes the other party up and running)
-mh.send_message(h)
-# we wait silently for a heartbeat, not like that whiner, the listener
-while True:
-    h = mh.history.wait_heartbeat()     # whatever the default timeout is
-    if h:
-        break
+    # Send the heartbeat to the other party (assumes the other party up and running)
+    mh.send_message(h)
+    # we wait silently for a heartbeat, not like that whiner, the listener
+    while True:
+        h = mh.history.wait_heartbeat()     # whatever the default timeout is
+        if h:
+            break
 
-# OK, reaching here means we have exchanged pleasantries so the other side has our attention, let's hit them
-for d in dialogue:
-    s=mh.connection.mav.statustext_encode(mavutil.mavlink.MAV_SEVERITY_INFO, bytes(d, 'ascii'))
-    print('<==== ' + s.text.decode('ascii'))    # Print what we are sending
-    mh.send_message(s)
-    s = mh.history.get_next_message('STATUSTEXT', timeout_sec=5)    # wait for a response
-    if s is None:   # no response by end of timeout, should not happen if listener is working properly
-        print('The keeper has died, I am crossing the bridge')
-    time.sleep(1)   # wait a bit before answering
+    # OK, reaching here means we have exchanged pleasantries so the other side has our attention, let's hit them
+    for d in dialogue:
+        s=mh.connection.mav.statustext_encode(mavutil.mavlink.MAV_SEVERITY_INFO, bytes(d, 'ascii'))
+        print('<==== ' + s.text.decode('ascii'))    # Print what we are sending
+        mh.send_message(s)
+        s = mh.history.get_next_message('STATUSTEXT', timeout_sec=5)    # wait for a response
+        if s is None:   # no response by end of timeout, should not happen if listener is working properly
+            print('The keeper has died, I am crossing the bridge')
+        time.sleep(1)   # wait a bit before answering

@@ -25,13 +25,15 @@ def send_heartbeat(handler, period_sec):
         time.sleep(period_sec)
 
 
-# Start our mavlink handler
-mh = MavlinkHandler()
-mh.mavlink_update_thread.add_hook(refuse_arm)   # add our contrarian hook
-mh.connect(connection_string=connection_string, source_system=my_system_id, source_component=my_component_id, start_update_thread=True)
+if __name__ == "__main__":
 
-# Start a thread sending a heartbeat
-heartbeat_thread = threading.Thread(target=send_heartbeat, args=(mh, 1))
-heartbeat_thread.daemon = True
-heartbeat_thread.start()
+    # Start our mavlink handler
+    mh = MavlinkHandler()
+    mh.mavlink_update_thread.add_hook(refuse_arm)   # add our contrarian hook
+    mh.connect(connection_string=connection_string, source_system=my_system_id, source_component=my_component_id, start_update_thread=True)
+
+    # Start a thread sending a heartbeat
+    heartbeat_thread = threading.Thread(target=send_heartbeat, args=(mh, 1))
+    heartbeat_thread.daemon = True
+    heartbeat_thread.start()
 

@@ -623,8 +623,6 @@ class MavlinkHandler(object):
         if self.connection is not None:
             return self.connection.mav.srcComponent
 
-
-
     def send_message(self, message, preserve_source=False, verbose=True,
                      force_mavlink1=False, wait_altered_source_clear_seconds=1, wait_loop_period_seconds=0.001):
         '''
@@ -659,6 +657,26 @@ class MavlinkHandler(object):
                 else:
                     print(s)
             return
+
+        if self.get_system_id() is None:
+            if verbose:
+                s = str(self.name) + ': cannot send since system id has not yet been set'
+                if self.logger is not None:
+                    self.logger.info(s)
+                else:
+                    print(s)
+            return
+
+        if self.get_component_id() is None:
+            if verbose:
+                s = str(self.name) + ': cannot send since component id has not yet been set'
+                if self.logger is not None:
+                    self.logger.info(s)
+                else:
+                    print(s)
+            return
+
+
 
         # If the object is already sending with altered_source, wait till it clears
         t0 = time.time()
@@ -698,17 +716,70 @@ class MavlinkHandler(object):
             self.connection.mav.send(message)
         self.history.total_messages_sent += 1
 
-    def setup_connection(self, connection_string, baud, source_system, source_component,
-                         planner_format, write, append, robust_parsing, notimestamps,
-                         input, dialect, autoreconnect, zero_time_base, retries,
-                         use_native, force_connected, progress_callback, verbose):
+    def send_get_response(self, message, response_message_type, timeout_sec=5, wait_loop_period_sec=0.01):
+        '''
+        Sends a message and grabs some expected response. This is very useful for all interactions where some specific
+        response is expected from a component. This is a blocking command which can raise TimeoutException.
+
+        Inputs:
+            message: the message to be sent out (pymavlink message object)
+            response_message_type: the type (str) we expect to get back (get_type() of pymavlink message object)
+            timeout_sec=5: timeout. If it is reached, this method will raise TimeoutException
+            wait_loop_period_sec=0.01: time the internal loop sleeps for between checks for valid response
+
+        Returns:
+            Either the response (pymavlink message object) or raises TimeoutException if no response is intercepted
+            within its timeout.
+        '''
+
+        # Start a record, mark the time and send the message
+        record = self.history.add_record(response_message_type)
+        t0 = time.time()
+        self.send_message(message)
+
+        # Twiddle thumbs till we hear back or timeout
+        while True:
+            if time.time() - t0 > timeout_sec:
+                self.history.remove_record(record)  # clean up the record before exiting
+                raise TimeoutException('Timeout while waiting for response of type: ' + str(response_message_type))
+
+            # presumably, some good stuff will eventually appear in record.message_list, let's check
+            for r in record.message_list:
+                response = r['message']
+                timestamp = r['timestamp']
+
+                # Filter out anything we don't like
+                if not response.get_type() == response_message_type: # this shouldn't ever happen but let's check anyway
+                    continue
+
+                if timestamp < t0:  # received response arrived before we sent out our message
+                    continue
+
+                if 'target_system' in message.fieldnames:       # outgoing message had a target system...
+                    if not  message.target_system == response.get_srcSystem():   # response from wrong system
+                        continue
+
+                if 'target_component' in message.fieldnames:    # outgoing message had a target component...
+                    if not message.target_component == response.get_srcComponent():   # response from wrong system
+                        continue
+
+                # Reaching here means we got a response that survived the filtering. Return it.
+                self.history.remove_record(record)  # clean up the record before exiting
+                return response
+
+            time.sleep(wait_loop_period_sec)
+
+    def _setup_connection(self, connection_string, baud, source_system, source_component,
+                          planner_format, write, append, robust_parsing, notimestamps,
+                          input, dialect, autoreconnect, zero_time_base, retries,
+                          use_native, force_connected, progress_callback, verbose):
         '''
         Do not use directly, rather use connect() which calls this one.
         '''
 
         if connection_string is not None:
             if verbose:
-                s = str(self.name) + ': setup_connection: setting connection string to ' + str(connection_string)
+                s = str(self.name) + ': _setup_connection: setting connection string to ' + str(connection_string)
                 if self.logger is not None:
                     self.logger.info(s)
                 else:
@@ -803,7 +874,7 @@ class MavlinkHandler(object):
             else:
                 print(s)
 
-        self.setup_connection(
+        self._setup_connection(
             connection_string=self.connection_string,
             baud=self.baud,
             source_system=source_system,

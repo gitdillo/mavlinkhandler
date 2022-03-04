@@ -10,8 +10,9 @@ class AutopilotHandler(object):
     Typically, this would run in a companion computer but might also run in a GCS.
     '''
     def __init__(self, autopilot_connection_string, system_id=None, component_id=None):
-        self.autopilot_mavlink_handler = MavlinkHandler()
+        self.autopilot_mavlink_handler = MavlinkHandler(name='autopilot_mavlink_handler')   # name is optional, for making error messages more understandable
         self.autopilot_mavlink_handler.mavlink_update_thread.add_hook(self.update_fields)
+        self.autopilot_mavlink_handler.mavlink_update_thread.add_hook(self.process_status_test)
 
         self.autopilot_mavlink_handler.connect(connection_string=autopilot_connection_string, start_update_thread=True,
                                                source_system=system_id, source_component=component_id)
@@ -196,9 +197,13 @@ class AutopilotHandler(object):
             else:
                 self.GPS_status_fix_type_description = 'Unknown'
 
+    def process_status_test(self, message):
+        if message.get_type() == 'STATUSTEXT':
+            print('STATUSTEXT from ' + str(message.get_srcSystem()) + ':' + str(
+                message.get_srcComponent()) + ': ' + message.text)
 
-    def _arm_disarm(self, arm=True, force=False, verbose=False, retries=10, timeout=5, wait_loop_sleep_period=1,
-                    command_long_timeout=0.5):
+
+    def _arm_disarm(self, arm=True, force=False, timeout_sec=5, verbose=True, command_long_timeout=0.5):
 
         if arm:  # Request is to arm
             if force:
@@ -211,70 +216,79 @@ class AutopilotHandler(object):
             else:
                 params = [0, 0, 0, 0, 0, 0, 0]
 
-        response = False
-        retry = False
-        t0 = time.time()
-        retry_counter = 0
-        while not response:
-            if time.time() - t0 > timeout:
-                raise TimeoutException('ERROR in _arm_disarm(): timeout without positive response')
-            if retry_counter > retries:
-                raise TimeoutException('ERROR in _arm_disarm(): max retries without positive response')
+        # run_command_long can raise TimeoutException, catch it here
+        try:
+            response = self.run_command_long(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, params, timeout_sec=timeout_sec,
+                                         verbose=verbose)
+        except TimeoutException:
+            return False
 
-            # We might have armed / disarmed but missed the positive response, handle this here
-            if arm:
-                if self.armed:
-                    if verbose:
-                        print('_arm_disarm(): ACK not received but vehicle armed successfully')
-                    return True
-            else:
-                if not self.armed:
-                    if verbose:
-                        print(': _arm_disarm(): ACK not received but vehicle disarmed successfully')
-                    return True
+        if response['success'] == True:
+            return True
+        else:
+            return False
 
-        #     try:
-        #         if retry:
-        #             retry_counter += 1
-        #             if verbose:
-        #                 self.logger.info(str(self.name) + ': _arm_disarm(): resending command')
-        #         response = self.run_command_long(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, params,
-        #                                          timeout_sec=command_long_timeout, verbose=verbose)
-        #     except TimeoutException as te:
-        #         if verbose:
-        #             self.logger.info(str(self.name) + ': _arm_disarm(): timeout in run_command_long(): ' + str(te))
-        #         retry = True
-        #     except ValueError as ve:
-        #         # In this case our request got rejected by the FCU
-        #         self.logger.info(str(self.name) + ': _arm_disarm(): FCU rejection at run_command_long():\n' + str(ve))
-        #         return False
-        #
-        #     time.sleep(wait_loop_sleep_period)
-        #
-        # if verbose:
-        #     if arm:
-        #         s = 'arming'
-        #     else:
-        #         s = 'disarming'
-        #     self.logger.info(str(self.name) + ': _arm_disarm(): successful ' + s)
-        # return response
+    def arm(self, force=False, verbose=True):
+
+        if self.armed:
+            print('Vehicle already armed, not sending anything')
+            return None
+
+        result = self._arm_disarm(arm=True, force=force, verbose=verbose)
+
+        return result
+
+    def disarm(self, force=False, verbose=True):
+
+        if not self.armed:
+            print('Vehicle already disarmed, not sending anything')
+            return None
+
+        result = self._arm_disarm(arm=False, force=force, verbose=verbose)
+
+        return result
 
     def run_command_long(self, command, params, expected_result=mavutil.mavlink.MAV_RESULT_ACCEPTED, timeout_sec=5.0,
-                         verbose=True, wait_loop_sleep_period_sec=0.01, target_system=None, target_component=None,
-                         confirmation=0):
+                         confirmation=0, verbose=True):
+        '''
+        Sends a command long and returns its result.
 
+        Inputs:
+            command: (MAV_CMD) the numberic id of the command to send,
+                see: https://mavlink.io/en/messages/common.html#mav_commands
+
+            params: the params for the command. This has to be a list with 7 elements.
+
+            expected_result: the numeric value of the MAV_RESULT from the expected COMMAND_ACK,
+                see: https://mavlink.io/en/messages/common.html#MAV_RESULT
+                see: https://mavlink.io/en/messages/common.html#COMMAND_ACK
+
+            timeout_sec: the timeout for this blocking command in seconds.
+
+            confirmation: confirmation field of COMMAND_LONG, normally leave to default 0,
+                see: https://mavlink.io/en/messages/common.html#COMMAND_LONG
+
+        Returns:
+            A dict of the form: {'success': False, 'ack': ack}
+                "success" will be True if we got a COMMAND_ACK with "expected_result" (see inputs).
+                If the result is not "expected_result", "success" will be False
+                "ack" is the returned COMMAND_ACK (pymavlink message object)
+
+            If no COMMAND_ACK has been received within "timeout_sec", it will raise TimeoutException
+        '''
         if not len(params) == 7:
             raise TypeError('params arg has to be a list of 7 items, '
                             'see:\nhttps://mavlink.io/en/messages/common.html#COMMAND_LONG')
 
-        if target_system is None:
-            target_system = self.autopilot_system_id
+        if self.autopilot_system_id is None:
+            raise ValueError('autopilot_system_id not set yet')
 
-        if target_component is None:
-            target_component = self.autopilot_component_id
+        if self.autopilot_component_id is None:
+            raise ValueError('autopilot_component_id not set yet')
 
-        cmd = self.autopilot_mavlink_handler.connection.mav.command_long_encode(target_system,
-                                                                              target_component,
+        # First, let's construct our command
+        cmd = self.autopilot_mavlink_handler.connection.mav.command_long_encode(self.autopilot_system_id,
+                                                                              self.autopilot_component_id,
                                                                               command,
                                                                               confirmation,
                                                                               params[0],
@@ -285,52 +299,35 @@ class AutopilotHandler(object):
                                                                               params[5],
                                                                               params[6],
                                                                               )
-        t0 = time.time()
-        # Start recording for COMMAND_ACK
-        record = self.autopilot_mavlink_handler.history.add_record(message_type='COMMAND_ACK',
-                                                                 system_id=self.autopilot_system_id,
-                                                                 component_id=self.autopilot_component_id)
-        # self.autopilot_mavlink_handler.connection.mav.send(cmd)
-        self.autopilot_mavlink_handler.send_message(cmd)
-        # ack = None
-        # recv_time = None
-        # while ack is None:
-        #     if time.time() - t0 > timeout_sec:
-        #         error_string = str(self.name) + ': timeout while waiting for COMMAND_ACK running command ' + str(
-        #             command)
-        #         if verbose:
-        #             self.logger.info(error_string)
-        #         self.vehicle_mavlink_handler.history.remove_record(record)
-        #         raise TimeoutException(error_string)
-        #
-        #     # Let's see what we have accumulated in our COMMAND_ACK record so far
-        #     for r in record.message_list:
-        #         if r['message'].command == command:  # if this is True, we have an ACK to our command
-        #             ack = r['message']
-        #             recv_time = r['timestamp']
-        #             break
-        #
-        #     time.sleep(wait_loop_sleep_period_sec)
-        #
-        # # Reaching here means we have a legit COMMAND_ACK in "ack"
-        # if ack.result == expected_result:
-        #     if verbose:
-        #         self.logger.info('%s: got successful ACK: %s in %.4f seconds' % (
-        #             self.name, mavutil.mavlink.enums["MAV_RESULT"][ack.result].name,
-        #             recv_time - t0))
-        #     self.vehicle_mavlink_handler.history.remove_record(record)
-        #     return ack, recv_time
-        # else:
-        #     error_string = "%s: Expected %s got %s\nDescription:\n%s" % (
-        #         self.name,
-        #         mavutil.mavlink.enums["MAV_RESULT"][expected_result].name,
-        #         mavutil.mavlink.enums["MAV_RESULT"][ack.result].name,
-        #         mavutil.mavlink.enums["MAV_RESULT"][ack.result].description
-        #     )
-        #     if verbose:
-        #         self.logger.info(error_string)
-        #     self.vehicle_mavlink_handler.history.remove_record(record)
-        #     raise ValueError(error_string)
+
+        # Now send and grab response, while marking the time
+        t0=time.time()
+        # This can throw TimeoutException if no response within timeout_sec. We don't catch it, let it propagate up
+        ack = self.autopilot_mavlink_handler.send_get_response(cmd, 'COMMAND_ACK', timeout_sec=timeout_sec)
+        dt = time.time() - t0
+
+        if ack.result == expected_result:
+            if verbose:
+                s = ('%s: got successful ACK: %s in %.4f seconds' % (self.autopilot_mavlink_handler.name, mavutil.mavlink.enums["MAV_RESULT"][ack.result].name, dt))
+                if self.autopilot_mavlink_handler.logger is None:
+                    print(s)
+                else:
+                    self.autopilot_mavlink_handler.logger.info(s)
+            return {'success': True, 'ack': ack}
+        else:
+            error_string = "%s: Expected %s got %s\nDescription:\n%s" % (
+                self.autopilot_mavlink_handler.name,
+                mavutil.mavlink.enums["MAV_RESULT"][expected_result].name,
+                mavutil.mavlink.enums["MAV_RESULT"][ack.result].name,
+                mavutil.mavlink.enums["MAV_RESULT"][ack.result].description
+            )
+            if verbose:
+                if self.autopilot_mavlink_handler.logger is None:
+                    print(error_string)
+                else:
+                    self.autopilot_mavlink_handler.logger.info(error_string)
+            return {'success': False, 'ack': ack}
+
 
     def identify_autopilot(self, wait_loop_period_sec=0.01):
         '''
@@ -360,19 +357,28 @@ class AutopilotHandler(object):
             self.autopilot_component_id) + '\nAutopilot class (MAV_AUTOPILOT): ' + str(self.autopilot_class) + '\n')
 
 
+if __name__ == "__main__":
+
+    # Connection related stuff
+    connection_string = 'udpin:localhost:14550'
+    component_id = 191  # companion computer but not enumerated in mavutil, see: https://mavlink.io/en/messages/common.html#MAV_COMP_ID_ONBOARD_COMPUTER
 
 
-# Connection related stuff
-connection_string = 'udpin:localhost:14550'
-component_id = 191  # companion computer but not enumerated in mavutil, see: https://mavlink.io/en/messages/common.html#MAV_COMP_ID_ONBOARD_COMPUTER
+    # NOTE: by NOT providing a system id below, we cannot send messages until our system id is set. This is done by calling
+    # identify_autopilot() which sets the "system_id" field to that of the first received HEARTBEAT from an autopilot.
+    # If we had wanted to send messages by setting our own system id, we should provide kwarg "system_id=..." below
+    ah = AutopilotHandler(connection_string, component_id=component_id)
 
+    # Once we have created our autopilot handler, we call identify_autopilot() to listen for a HEARTBEAT with
+    # component_id of 1 (autopilot).
+    # This will set ah.autopilot_system_id to the system id in this HEARTBEAT.
+    # Subsequent messages sent out by the autopilot handler's mavlink handler will use this system id.
+    ah.identify_autopilot()
 
-# NOTE: by NOT providing a system id below, we cannot send messages until our system id is set. This is done by calling
-# identify_autopilot() which sets system id to that of the first received HEARTBEAT from an autopilot.
-# If we had wanted to send messages by setting our own system id, we should provide kwarg system_id= below
-ah = AutopilotHandler(connection_string, component_id=component_id)
-ah.identify_autopilot()
-
-params = [1, 0, 0, 0, 0, 0, 0]
-cmd = mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM
-ah.run_command_long(cmd, params)
+    # Demonstrate arming the vehicle
+    print('Trying to arm the vehicle')
+    result = ah.arm()
+    if result:
+        print('Vehicle armed successfully')
+    else:
+        print('Vehicle failed to arm')
