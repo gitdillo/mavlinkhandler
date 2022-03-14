@@ -527,7 +527,17 @@ class MavlinkUpdateThread(object):
                             print(s)
 
             # Reaching here means we are neither terminated not paused
-            msg = self.connection.recv_match(blocking=True, timeout=message_timeout)
+            msg = None
+            try:
+                msg = self.connection.recv_match(blocking=True, timeout=message_timeout)
+            except Exception as e:
+                if verbose:
+                    s = str(self.name) + ':  while listening for incoming messages got exception: ' + str(e)
+                    if self.logger is not None:
+                        self.logger.info(s)
+                    else:
+                        print(s)
+                continue
             if msg is None:
                 if verbose:
                     s = str(self.name) + ': ' + str(
