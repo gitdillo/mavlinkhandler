@@ -11,7 +11,7 @@ class TimeoutException(ErrorException):
     pass
 
 
-class total_received_bytes(object):
+class SourceHistory(object):
     def __init__(self, history_depth=10, logger=None, source_system=None, source_component=None,
                  verbose_message_drop=False, verbose_new_messages=False):
         self.history_depth = history_depth
