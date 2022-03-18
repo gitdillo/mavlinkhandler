@@ -11,7 +11,7 @@ class TimeoutException(ErrorException):
     pass
 
 
-class SourceHistory(object):
+class total_received_bytes(object):
     def __init__(self, history_depth=10, logger=None, source_system=None, source_component=None,
                  verbose_message_drop=False, verbose_new_messages=False):
         self.history_depth = history_depth
@@ -24,6 +24,7 @@ class SourceHistory(object):
         self.last_received_seq = None
         self.total_received_messages = 0
         self.total_dropped_messages = 0
+        self.total_received_bytes = 0
 
         # if self.logger is None:
         #     self.logger = logging.getLogger('source_history_logger')
@@ -40,7 +41,7 @@ class SourceHistory(object):
         if not (self.source_system == msg.get_srcSystem() and self.source_component == msg.get_srcComponent()):
             raise ValueError('Asked to store message whose system or component id do not match those of this history')
 
-        self.update_message_seq(msg.get_seq())
+        self.update_message_stats(msg)
 
         if msg.get_type() not in self.mavlink_messages.keys():
             if self.verbose_new_messages:
@@ -66,11 +67,12 @@ class SourceHistory(object):
         '''
         return self.mavlink_messages[msg_type][msg_index]
 
-    def update_message_seq(self, seq):
+    def update_message_stats(self, msg):
         '''
         Reads the passed message's seq and records it in field "last_received_seq", updates total messages received and
         checks if any messages were dropped in between
         '''
+        seq = msg.get_seq()
         # If self.last_received_seq is None this is our fist message so we need to init
         if self.last_received_seq is None:
             self.last_received_seq = seq
@@ -96,6 +98,7 @@ class SourceHistory(object):
         self.total_dropped_messages += dropped_messages
         self.total_received_messages += 1
         self.last_received_seq = seq
+        self.total_received_bytes += len(msg.get_msgbuf())
 
     def get_message_rate_Hz(self, msg_type):
         '''
