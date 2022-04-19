@@ -10,7 +10,6 @@ class ErrorException(Exception):
 class TimeoutException(ErrorException):
     pass
 
-
 class SourceHistory(object):
     def __init__(self, history_depth=10, logger=None, source_system=None, source_component=None,
                  verbose_message_drop=False, verbose_new_messages=False):
@@ -120,7 +119,6 @@ class SourceHistory(object):
 
     def get_message_type_list(self):
         return list(self.mavlink_messages.keys())
-
 
 class MavlinkHistory(object):
     '''
@@ -557,7 +555,6 @@ class MavlinkUpdateThread(object):
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
-
 class MavlinkHandler(object):
 
     def __init__(self, connection_string='udpin:0.0.0.0:14550', baud=57600, mavlink2=True, dialect='ardupilotmega',
@@ -581,6 +578,10 @@ class MavlinkHandler(object):
         # NOTE: we add this object's history's store_message method as an initial hook to the mavlink update thread
         self.attach_mavlink_update_thread(name=thread_name, hook_list=[self.history.store_message],
                                           start_thread=thread_start, logger=thread_logger, verbose=self.verbose_thread)
+
+        # Expose some of the thread's methods through the handler
+        self.add_hook = self.mavlink_update_thread.add_hook
+        self.remove_hook = self.mavlink_update_thread.remove_hook
 
         if self.mavlink2:
             os.environ['MAVLINK20'] = '1'
