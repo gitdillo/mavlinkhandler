@@ -231,15 +231,15 @@ class MavlinkHistory(object):
                 return s
         return None
 
-    def add_source_history(self, system_id, component_id, verbose=True):
+    def add_source_history(self, system_id, component_id):
         '''
         Adds a source history with passed system_id, component_id to this object's "source_histories" field. Returns a
         reference to the added SourceHistory object.
         If a source history with these ids already exists, adds nothing and returns None.
         '''
-        # Check that the requested source history does not actually exists
+        # Check that the requested source history does not actually exist
         if self.get_source_history(system_id, component_id) is None:
-            if verbose:
+            if self.verbose_new_messages:
                 s = 'Adding source with system id: ' + str(system_id) + ', component id: ' + str(component_id)
                 if self.logger is not None:
                     self.logger.info(s)
@@ -251,7 +251,7 @@ class MavlinkHistory(object):
             self.source_histories.append(history)
             return history
         else:
-            if verbose:
+            if self.verbose_new_messages:
                 s = 'add_source_history(): source history with system id: ' + str(system_id) + ', component id: ' + str(
                         component_id) + ' already exists. Skipping'
                 if self.logger is not None:
@@ -269,14 +269,14 @@ class MavlinkHistory(object):
             l.append({'system': s.source_system, 'component': s.source_component})
         return l
 
-    def store_message(self, msg, verbose=True):
+    def store_message(self, msg):
         '''
         Stores the passed message to the appropriate source history. If a source history with the source system and
         component of the message does not exist, it is added to this object's source histories.
         '''
         source_history = self.get_source_history(msg.get_srcSystem(), msg.get_srcComponent())
         if source_history is None:
-            source_history = self.add_source_history(msg.get_srcSystem(), msg.get_srcComponent(), verbose=verbose)
+            source_history = self.add_source_history(msg.get_srcSystem(), msg.get_srcComponent())
         source_history.store_message(msg)
         self.total_messages_received += 1
 
@@ -559,7 +559,7 @@ class MavlinkHandler(object):
 
     def __init__(self, connection_string='udpin:0.0.0.0:14550', baud=57600, mavlink2=True, dialect='ardupilotmega',
                  logger=None, name='MavlinkHandler', thread_name=None, thread_logger=None, thread_start=False,
-                 mavlink_history_depth=10, verbose_thread=False, verbose_message_drop=False):
+                 mavlink_history_depth=10, verbose_thread=False, verbose_message_drop=False, verbose_new_messages=True):
 
         self.connection_string = connection_string
         self.baud = baud
@@ -573,7 +573,8 @@ class MavlinkHandler(object):
         self.connection = None     # this will hold the mavlink connection
 
         self.history = MavlinkHistory(history_depth=mavlink_history_depth, logger=self.logger,
-                                      verbose_message_drop=verbose_message_drop)
+                                      verbose_message_drop=verbose_message_drop,
+                                      verbose_new_messages=verbose_new_messages)
 
         # NOTE: we add this object's history's store_message method as an initial hook to the mavlink update thread
         self.attach_mavlink_update_thread(name=thread_name, hook_list=[self.history.store_message],
@@ -920,6 +921,6 @@ class MavlinkHandler(object):
 
 
 if __name__ == "__main__":
-
+    # If called as script, try to connect to UDP 14550
     mh = MavlinkHandler(connection_string='udpin:localhost:14550')
     mh.connect(start_update_thread=True, verbose=False)
