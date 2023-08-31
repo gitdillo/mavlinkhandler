@@ -186,7 +186,6 @@ class MavlinkHistory(object):
             self.component_id = component_id
             self.creation_timestamp = time.time()
             self.message_list = []
-            self.isActive = False
 
         def process_message(self, msg):
             '''
@@ -494,7 +493,7 @@ class MavlinkUpdateThread(object):
 
             t_start = time.time()
 
-            if self.termflag.isSet():
+            if self.termflag.is_set():
                 s = str(self.name) + ': MAVLINK update thread exiting.'
                 if self.logger is not None:
                     self.logger.info(s)
@@ -504,7 +503,7 @@ class MavlinkUpdateThread(object):
                 self.isRunning = False
                 return
 
-            if self.pauseflag.isSet():
+            if self.pauseflag.is_set():
                 if self.isPaused == False:
                     self.isPaused = True
                     self.isRunning = False
@@ -528,6 +527,8 @@ class MavlinkUpdateThread(object):
                             print(s)
 
             # Reaching here means we are neither terminated not paused
+
+            # Let's try to grab a message
             msg = None
             try:
                 msg = self.connection.recv_match(blocking=True, timeout=message_timeout)
@@ -643,7 +644,7 @@ class MavlinkHandler(object):
         '''
         Sends a mavlink message, assuming a connection has been set up (field "connection" is not None).
 
-        If preserve_source is set to True, the passed message will be transmitted as is, i.e. using exists in its
+        If preserve_source is set to True, the passed message will be transmitted as is, i.e. using what exists in its
         _msgbuf field, which includes its original source system and source component, rather than that of this object
         (which can be found at self.connection.mav.srcSystem and self.connection.mav.srcComponent).
         The idea is for preserve_source to be used when retransmitting a message received from another source, e.g.

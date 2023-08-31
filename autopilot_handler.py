@@ -12,7 +12,7 @@ class AutopilotHandler(object):
     def __init__(self, autopilot_connection_string, system_id=None, component_id=None):
         self.autopilot_mavlink_handler = MavlinkHandler(name='autopilot_mavlink_handler')   # name is optional, for making error messages more understandable
         self.autopilot_mavlink_handler.mavlink_update_thread.add_hook(self.update_fields)
-        self.autopilot_mavlink_handler.mavlink_update_thread.add_hook(self.process_status_test)
+        self.autopilot_mavlink_handler.mavlink_update_thread.add_hook(self.process_status_text)
 
         self.autopilot_mavlink_handler.connect(connection_string=autopilot_connection_string, start_update_thread=True,
                                                source_system=system_id, source_component=component_id)
@@ -197,7 +197,7 @@ class AutopilotHandler(object):
             else:
                 self.GPS_status_fix_type_description = 'Unknown'
 
-    def process_status_test(self, message):
+    def process_status_text(self, message):
         if message.get_type() == 'STATUSTEXT':
             print('STATUSTEXT from ' + str(message.get_srcSystem()) + ':' + str(
                 message.get_srcComponent()) + ': ' + message.text)
