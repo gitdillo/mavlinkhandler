@@ -454,7 +454,7 @@ class MavlinkUpdateThread(object):
 
     def start(self, verbose=True):
         self.thread = threading.Thread(target=self.update,
-                             kwargs={'message_timeout': 5,
+                             kwargs={'message_timeout_sec': 0.5,
                                      'verbose': verbose})
 
         self.thread.daemon = True
@@ -487,7 +487,7 @@ class MavlinkUpdateThread(object):
         if self.thread is not None and self.thread.is_alive():
             self.thread.join()
 
-    def update(self, message_timeout=5, verbose=True):
+    def update(self, message_timeout_sec=5, verbose=True):
 
         while True:
 
@@ -531,7 +531,7 @@ class MavlinkUpdateThread(object):
             # Let's try to grab a message
             msg = None
             try:
-                msg = self.connection.recv_match(blocking=True, timeout=message_timeout)
+                msg = self.connection.recv_match(blocking=True, timeout=message_timeout_sec)
             except Exception as e:
                 if verbose:
                     s = str(self.name) + ':  while listening for incoming messages got exception: ' + str(e)
@@ -543,7 +543,7 @@ class MavlinkUpdateThread(object):
             if msg is None:
                 if verbose:
                     s = str(self.name) + ': ' + str(
-                        message_timeout) + ' second timeout while waiting for MAVLINK message'
+                        message_timeout_sec) + ' second timeout while waiting for MAVLINK message'
                     if self.logger is not None:
                         self.logger.info(s)
                     else:

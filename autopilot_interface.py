@@ -4,9 +4,9 @@ import logging
 
 # The following is awful but preferable to spending my life getting import to stop being retarded
 try:
-    from mavlinkhandler.mavlinkhandler import MavlinkHandler
+    from mavlinkhandler.mavlinkhandler import MavlinkHandler, TimeoutException
 except ImportError:
-    from mavlinkhandler import MavlinkHandler
+    from mavlinkhandler import MavlinkHandler, TimeoutException
 
 
 
@@ -33,9 +33,8 @@ class AutopilotInterface:
         '''
         Creates an Autopilot_interface, a class encapsulating a Mavlink Handler, but geared specifically towards
         interactions with an autopilot as opposed to any arbitrary mavlink components whose messages might be present in
-        a mavlink data stream.
-
-        TODO: add info on fields.
+        a mavlink data stream. Behaviour can be blocking or non blocking, depending on value of optional argument
+        "connection_timeout_seconds" (see below).
 
         :param connection_string: connection string, see https://mavlink.io/en/mavgen_python/#connection_string
         :param connection_baud: set this if using serial connection strings, ignored otherwise
@@ -56,10 +55,26 @@ class AutopilotInterface:
         :param verbose_connection: set True to print connection related messages.
         :param verbose_new_messages: set True to print a message each time novel mavlink message type is encountered.
         :param connection_timeout_seconds: if set to a non None value, will raise a TimeoutError if no autopilot has
-            been identified by the time of the timeout. Setting it to None will return an object immediately but this
-            object might not have had connected to an autopilot yet. To test for this, look at the "autopilot_connected"
-            field which will be True once a suitable (in case we have set "autopilot_sysid" above) autopilot has been
-            identified.
+            been identified by the time of the timeout (the method blocks until we get an autopilot or we hit timeout).
+            Setting it to None will return an object immediately (non blocking) but this object might not have had
+            connected to an autopilot yet. To test for this, look at the "autopilot_connected" field which will be True
+            once a suitable (in case we have set "autopilot_sysid" above) autopilot has been identified.
+
+        Useful fields:
+            - component_id: own component ID (we use this for messages we send out)
+            - system_id: own system ID (we use this for messages we send out)
+
+            - autopilot_connected: True / False. Start as False, turns True when a suitable autopilot has been
+                identified
+            - connected_autopilot_sysid: will get set once a suitable autopilot has been identified
+            - connected_autopilot_compid: normally this is 1 (mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1). Gets set once a
+                suitable autopilot has been identified
+            - mavlink_handler: the MavlinkHandler object associated with the connected autopilot.
+            - connected_autopilot_history: the mavlinkhandler.MavlinkHistory object associated with the connected
+                autopilot.
+            - MAV_TYPE: our own MAV_TYPE
+            - MAV_AUTOPILOT: our own MAV_AUTOPILOT
+            - MAV_STATE: our own MAV_STATE
         '''
 
         # The following are what we really care about, connect there and listen for these messages
@@ -82,6 +97,7 @@ class AutopilotInterface:
         self.mavlink_handler = None
         self.connected_autopilot_sysid = None
         self.connected_autopilot_compid = None
+        self.connected_autopilot_class = None
         self.connected_autopilot_history = None
 
         # Convenience field, possibly add an externally supplied logger
@@ -91,6 +107,8 @@ class AutopilotInterface:
         self._verbose_connection = verbose_connection
         self._verbose_new_messages = verbose_new_messages
 
+        # This is where the current state of the autopilot is auto updated
+        self.autopilot_state = None
 
         if autospawn_mavlink_handler:
             self.spawn_mavlink_handler(verbose=self._verbose_connection)
@@ -118,6 +136,51 @@ class AutopilotInterface:
         else:
             self.logger.log(level, message)
 
+    def _arm_disarm(self, arm=True, force=False, timeout_sec=5, verbose=True, command_long_timeout=0.5):
+
+        if arm:  # Request is to arm
+            if force:
+                params = [1, 21196, 0, 0, 0, 0, 0]
+            else:
+                params = [1, 0, 0, 0, 0, 0, 0]
+        else:  # Request is to disarm
+            if force:
+                params = [0, 21196, 0, 0, 0, 0, 0]
+            else:
+                params = [0, 0, 0, 0, 0, 0, 0]
+
+        # run_command_long can raise TimeoutException, catch it here
+        try:
+            response = self.run_command_long(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, params, timeout_sec=timeout_sec,
+                                         verbose=verbose)
+        except TimeoutException:
+            return False
+
+        if response['success'] == True:
+            return True
+        else:
+            return False
+
+    def arm(self, force=False, verbose=True):
+
+        if self.armed:
+            print('Vehicle already armed, not sending anything')
+            return None
+
+        result = self._arm_disarm(arm=True, force=force, verbose=verbose)
+
+        return result
+
+    def disarm(self, force=False, verbose=True):
+
+        if not self.armed:
+            print('Vehicle already disarmed, not sending anything')
+            return None
+
+        result = self._arm_disarm(arm=False, force=force, verbose=verbose)
+
+        return result
+
 
     def spawn_mavlink_handler(self, verbose=True):
         '''
@@ -129,61 +192,67 @@ class AutopilotInterface:
         def autopilot_connection_setup_hook(msg):
             '''
             This hook will be added to the mavlink handler by this method. It will monitor the history until it sees a
-            message from a source with component id mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1 (this means a component
+            heartbeat from a source with component id 1, (mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1, this means a component
             identifying as an autopilot).
 
-            It will then assume this is the autopilot we connect to which will give us our own system id (we want the
-                same sysid as the autopilot) which we set in self.system_id.
+            If _target_autopilot_sysid is None (default behaviour), it will then assume this is the autopilot we connect
+            to which will give us our own system id (we want the same sysid as the autopilot) which we set in
+            self.system_id.
             NOTE: if we have passed "autopilot_sysid" to the constructor of "AutopilotInterface", we will only accept a
                 connection to an autopilot with that sysid!
 
             It will set this object's fields connected_autopilot_sysid and connected_autopilot_compid
             It will set this object's field connected_autopilot_history to the mavlink handler's history assigned to the
                 autopilot.
+            It will send a heartbeat with our own system and component IDs to announce our existence to the autopilot.
+            It will set this object's autopilot_connected field to True, signalling connection established.
             It will then remove itself from the hook list.
             '''
-            # Check if we have received a message from a source with component id 1 (identifies as autopilot)
-            for source in self.mavlink_handler.history.get_source_ids():
-                if source['component'] == mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1:    # Bingo, this source claims to be an autopilot
 
-                    # Just one final thing to check, if we have been given a target autopilot sysid, we need to check
-                    # this is the correct one
-                    if self._target_autopilot_sysid is not None and self._target_autopilot_sysid != source['system']:
-                        continue
+            # Check if this is a suitable message
+            if msg.get_type() == 'HEARTBEAT':   # is it a heartbeat?
+                # If we have set self._target_autopilot_sysid, reject other sysid values
+                if self._target_autopilot_sysid is not None and not self._target_autopilot_sysid == msg.get_srcSystem():
+                    return
+                # Reaching here, the message is a suitable heartbeat, check the component id
+                if msg.get_srcComponent() == mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1:    # claims to be an autopilot
 
-                    # If we have not been given a system id, we assign that of the detected autopilot
+                    # Reaching here, the message is a suitable heartbeat, we can start setting the relevant fields
+
+                    # Most important, our own system id (assuming it is unset)
                     if self.system_id is None:
-                        self.system_id = source['system']
+                        self.system_id = msg.get_srcSystem()
 
-                    # Set this object's connected_autopilot... fields
-                    self.connected_autopilot_sysid = source['system']
-                    self.connected_autopilot_compid = source['component']
+                        # Set this object's connected_autopilot... fields
+                        self.connected_autopilot_sysid = msg.get_srcSystem()
+                        self.connected_autopilot_compid = msg.get_srcComponent()
 
-                    # Ensure this object's and its mavlink handler are using the same ids
-                    self.mavlink_handler.set_system_id(self.system_id)
-                    self.mavlink_handler.set_component_id(self.component_id)
+                        # Ensure this object and its mavlink handler are using the same ids
+                        self.mavlink_handler.set_system_id(self.system_id)
+                        self.mavlink_handler.set_component_id(self.component_id)
 
-                    # Redirect this object's sysids to those of its mavlink handler
-                    self.system_id = self.mavlink_handler.get_system_id()
-                    self.component_id = self.mavlink_handler.get_component_id()
+                        # Set field connected_autopilot_history to the history of the connected FCU
+                        self.connected_autopilot_history = self.mavlink_handler.history.get_source_history(
+                            self.connected_autopilot_sysid, self.connected_autopilot_compid)
 
-                    # Set field connected_autopilot_history to the history of the connected FCU
-                    self.connected_autopilot_history = self.mavlink_handler.history.get_source_history(
-                        self.connected_autopilot_sysid, self.connected_autopilot_compid)
+                        # Raise the autopilot connected flag
+                        self.autopilot_connected = True
 
-                    # Raise the autopilot connected flag
-                    self.autopilot_connected = True
+                        # Fire off a heartbeat to let the other side we are here
+                        if verbose:     # this is the "verbose" variable of the enclosing method "spawn_mavlink_handler"
+                            self.log('Connected to an autopilot with system:component IDs: ' + str(
+                                self.connected_autopilot_sysid) + ':' + str(
+                                self.connected_autopilot_compid) + '. Setting own IDs to: ' + str(
+                                self.system_id) + ':' + str(self.component_id) + ' and responding with a heartbeat.')
+                        self.send_heartbeat()
 
-                    # Fire off a heartbeat to let the other side we are here
-                    if verbose:     # note that this is the "verbose" variable of the enclosing method
-                        self.log('Connected to an autopilot with system:component IDs: ' + str(
-                            self.connected_autopilot_sysid) + ':' + str(
-                            self.connected_autopilot_compid) + '. Setting own IDs to: ' + str(self.system_id) + ':' + str(
-                            self.component_id) + ' and responding with a heartbeat.')
-                    self.send_heartbeat()
+                        # Point self.autopilot_state to the connected autopilot
+                        self.autopilot_state = AutopilotState(self.connected_autopilot_sysid,
+                                                              self.connected_autopilot_compid)
+                        self.mavlink_handler.add_hook(self.autopilot_state.update)
 
-                    # Finally, remove this method from the hook list
-                    self.mavlink_handler.remove_hook(autopilot_connection_setup_hook)
+                        # Finally, remove this method from the hook list
+                        self.mavlink_handler.remove_hook(autopilot_connection_setup_hook)
 
         self.mavlink_handler = MavlinkHandler(logger=self.logger,
                                                              verbose_new_messages=self._verbose_new_messages)
@@ -191,6 +260,8 @@ class AutopilotInterface:
         self.mavlink_handler.connect(connection_string=self.connection_string, baud=self.baud, source_system=0,
                                      source_component=self.component_id, start_update_thread=True,
                                      verbose=self._verbose_connection)
+
+
 
 
     def run_command_long(self, command, params, expected_result=mavutil.mavlink.MAV_RESULT_ACCEPTED, timeout_sec=5.0,
@@ -377,5 +448,13 @@ class AutopilotInterface:
     #     self.send_tune_to_autopilot('E8D8C8')
 
 
+class AutopilotState:
+    def __init__(self, autopilot_sysid, autopilot_compid):
+        self.autopilot_sysid = autopilot_sysid
+        self.autopilot_compid = autopilot_compid
+    def update(self, msg):
+        if not msg.get_srcSystem() == self.autopilot_sysid or not msg.get_srcComponent() == self.autopilot_compid:
+            return
+        print(msg)
 
 
