@@ -108,7 +108,7 @@ class AutopilotInterface:
         self._verbose_new_messages = verbose_new_messages
 
         # This is where the current state of the autopilot is auto updated
-        self.autopilot_state = None
+        self.connected_autopilot_state = None
 
         if autospawn_mavlink_handler:
             self.spawn_mavlink_handler(verbose=self._verbose_connection)
@@ -246,10 +246,10 @@ class AutopilotInterface:
                                 self.system_id) + ':' + str(self.component_id) + ' and responding with a heartbeat.')
                         self.send_heartbeat()
 
-                        # Point self.autopilot_state to the connected autopilot
-                        self.autopilot_state = AutopilotState(self.connected_autopilot_sysid,
+                        # Point self.connected_autopilot_state to the connected autopilot
+                        self.connected_autopilot_state = AutopilotState(self.connected_autopilot_sysid,
                                                               self.connected_autopilot_compid)
-                        self.mavlink_handler.add_hook(self.autopilot_state.update)
+                        self.mavlink_handler.add_hook(self.connected_autopilot_state.update)
 
                         # Finally, remove this method from the hook list
                         self.mavlink_handler.remove_hook(autopilot_connection_setup_hook)
@@ -452,9 +452,79 @@ class AutopilotState:
     def __init__(self, autopilot_sysid, autopilot_compid):
         self.autopilot_sysid = autopilot_sysid
         self.autopilot_compid = autopilot_compid
+        self.registered_message_hook_dict = {}
+
+        self.register_message('HEARTBEAT', ['armed', 'mav_state', 'mode'], self.update_heartbeat)
     def update(self, msg):
+        # First, filter out messages not originating from our connected autopilot
         if not msg.get_srcSystem() == self.autopilot_sysid or not msg.get_srcComponent() == self.autopilot_compid:
             return
-        print(msg)
+
+        # Try to call a registered hook on our message
+        try:
+            self.registered_message_hook_dict[msg.get_type()](msg)
+        except KeyError:    # the message has not been registered
+            pass
+
+
+    def register_message(self, message_type, message_field_list, message_hook):
+        '''
+        Registers a hook "message_hook" to be called upon receipt of a message of type "message_type", which will update
+        fields "message_field_list", e.g. for a hook AutopilotState.update_heartbeat() accessing 'armed', 'mav_state'
+        and 'mode':
+
+        aps = AutopilotState(...)
+        aps.register_message('HEARTBEAT', ['armed', 'mav_state', 'mode'], aps.update_heartbeat)
+
+        NOTE: it is important to add all fields that the hook accesses since these will be created to the AutopilotState
+         object by this method. If a field is not created here but the hook tries to write to it, it can lead to
+         AttributeError at runtime.
+
+        :param message_type: the message type to be registered (string, as returned by a mavlink message's get_type())
+        :param message_field_list: list of fields that the hook will need access to (these will be dynamically added to
+            the AutopilotState object by this method)
+        :param message_hook: the method to handle this message. It will be called by the message as its only argument so
+            it will need to be of the form:
+            def some_hook(message)
+        '''
+        for mf in message_field_list:
+            setattr(self, mf, None)
+            self.registered_message_hook_dict[message_type] = message_hook
+
+    def update_heartbeat(self, heartbeat_msg):
+        '''
+        Hook for the HEARTBEAT message
+        :param heartbeat_msg: the heartbeat message passed to us by the update() method. Writes to fields 'armed',
+        'mav_state' and 'mode'.
+        '''
+        # Arm state first
+        if (heartbeat_msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) == 0:
+            self.armed = False
+        else:
+            self.armed = True
+        # Mode: we translate using the mavutil.mode_string_v10() method
+        self.mode = mavutil.mode_string_v10(heartbeat_msg)
+        # MAV_STATE: see https://mavlink.io/en/messages/common.html#MAV_STATE
+        # also mapping in mavutil.mavlink.MAV_STATE_XXX
+        if heartbeat_msg.system_status == mavutil.mavlink.MAV_STATE_UNINIT:
+            self.mav_state = 'MAV_STATE_UNINIT'
+        elif heartbeat_msg.system_status == mavutil.mavlink.MAV_STATE_BOOT:
+            self.mav_state = 'MAV_STATE_BOOT'
+        elif heartbeat_msg.system_status == mavutil.mavlink.MAV_STATE_CALIBRATING:
+            self.mav_state = 'MAV_STATE_CALIBRATING'
+        elif heartbeat_msg.system_status == mavutil.mavlink.MAV_STATE_STANDBY:
+            self.mav_state = 'MAV_STATE_STANDBY'
+        elif heartbeat_msg.system_status == mavutil.mavlink.MAV_STATE_ACTIVE:
+            self.mav_state = 'MAV_STATE_ACTIVE'
+        elif heartbeat_msg.system_status == mavutil.mavlink.MAV_STATE_CRITICAL:
+            self.mav_state = 'MAV_STATE_CRITICAL'
+        elif heartbeat_msg.system_status == mavutil.mavlink.MAV_STATE_EMERGENCY:
+            self.mav_state = 'MAV_STATE_EMERGENCY'
+        elif heartbeat_msg.system_status == mavutil.mavlink.MAV_STATE_POWEROFF:
+            self.mav_state = 'MAV_STATE_POWEROFF'
+        elif heartbeat_msg.system_status == mavutil.mavlink.MAV_STATE_FLIGHT_TERMINATION:
+            self.mav_state = 'MAV_STATE_FLIGHT_TERMINATION'
+        else:
+            self.mav_state = 'MAV_STATE_UNINIT'
 
 
