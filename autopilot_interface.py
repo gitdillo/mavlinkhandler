@@ -452,9 +452,9 @@ class AutopilotState:
     def __init__(self, autopilot_sysid, autopilot_compid):
         self.autopilot_sysid = autopilot_sysid
         self.autopilot_compid = autopilot_compid
-        self.registered_message_hook_dict = {}
+        self._registered_message_hook_dict = {}
 
-        self.register_message('HEARTBEAT', ['armed', 'mav_state', 'mode'], self.update_heartbeat)
+        self.register_message('HEARTBEAT', ['armed', 'mav_state', 'mode'], self._update_heartbeat)
     def update(self, msg):
         # First, filter out messages not originating from our connected autopilot
         if not msg.get_srcSystem() == self.autopilot_sysid or not msg.get_srcComponent() == self.autopilot_compid:
@@ -462,7 +462,7 @@ class AutopilotState:
 
         # Try to call a registered hook on our message
         try:
-            self.registered_message_hook_dict[msg.get_type()](msg)
+            self._registered_message_hook_dict[msg.get_type()]['hook'](msg)
         except KeyError:    # the message has not been registered
             pass
 
@@ -470,15 +470,20 @@ class AutopilotState:
     def register_message(self, message_type, message_field_list, message_hook):
         '''
         Registers a hook "message_hook" to be called upon receipt of a message of type "message_type", which will update
-        fields "message_field_list", e.g. for a hook AutopilotState.update_heartbeat() accessing 'armed', 'mav_state'
+        fields "message_field_list", e.g. for a hook AutopilotState._update_heartbeat() accessing 'armed', 'mav_state'
         and 'mode':
 
         aps = AutopilotState(...)
-        aps.register_message('HEARTBEAT', ['armed', 'mav_state', 'mode'], aps.update_heartbeat)
+        aps.register_message('HEARTBEAT', ['armed', 'mav_state', 'mode'], aps._update_heartbeat)
 
         NOTE: it is important to add all fields that the hook accesses since these will be created to the AutopilotState
          object by this method. If a field is not created here but the hook tries to write to it, it can lead to
          AttributeError at runtime.
+
+        NOTE2: if the fields in "message_field_list" already exists in the object or if the message in "message_type"
+            has already been registered, this method returns False and exits without registering anything. To
+            re-register a message first deregister it using deregister_message() and then register it again using this
+            method.
 
         :param message_type: the message type to be registered (string, as returned by a mavlink message's get_type())
         :param message_field_list: list of fields that the hook will need access to (these will be dynamically added to
@@ -486,12 +491,66 @@ class AutopilotState:
         :param message_hook: the method to handle this message. It will be called by the message as its only argument so
             it will need to be of the form:
             def some_hook(message)
+
+        :return: True if all goes well. False if one of the fields in "message_field_list" already exists or the message
+            type has already been registered before, in which case no registering takes place.
         '''
+        # Check that this message is not already registered
+        if self.message_is_registered(message_type):
+            return False
+
+        # Check that the passed "message_field_list" does not contain any already existing object fields.
+        for mf in message_field_list:
+            if hasattr(self, mf):
+                return False
+
+        # Reaching here means all the fields in "message_field_list" do not exist in our object, let's init them
         for mf in message_field_list:
             setattr(self, mf, None)
-            self.registered_message_hook_dict[message_type] = message_hook
 
-    def update_heartbeat(self, heartbeat_msg):
+        # Finally, register the hook with the message type in the dictionary "_registered_message_hook_dict"
+        self._registered_message_hook_dict[message_type] = {'hook': message_hook, 'fields': message_field_list}
+        return True
+
+    def message_is_registered(self, message_type):
+        if message_type in self.get_registered_messages():
+            return True
+        else:
+            return False
+
+    def get_registered_messages(self):
+        return list(self._registered_message_hook_dict.keys())
+
+    def deregister_message(self, message_type):
+        '''
+        Deregisters a message of "message_type", does the opposite of register_message(). Clears the hook and removes
+            fields from the object.
+
+        :param message_type: the message type to deregister.
+
+        :return: True if a message was found and removed, False if no such message was registered so nothing was
+            removed. In either case, a message of "message_type" will no longer be registered with the AutopilotState
+            object after a call to this method.
+        '''
+        if not self.message_is_registered(message_type):
+            return False
+        # Reaching here we know this message is registered
+
+        # First, we need to remove the hook by deleting the entry in "_registered_message_hook_dict" so that a call to
+        # the hook doesn't try to update the fields after we remove them. However, the fields are in the entry so we
+        # need to make a copy before we delete it.
+        message_entry = self._registered_message_hook_dict.pop(message_type)
+
+        # We got rid of the "_registered_message_hook_dict" entry, now let's clear the object fields
+        for field in message_entry['fields']:
+            try:
+                delattr(self, field)
+            except AttributeError:
+                pass
+
+        return True
+
+    def _update_heartbeat(self, heartbeat_msg):
         '''
         Hook for the HEARTBEAT message
         :param heartbeat_msg: the heartbeat message passed to us by the update() method. Writes to fields 'armed',
@@ -525,6 +584,6 @@ class AutopilotState:
         elif heartbeat_msg.system_status == mavutil.mavlink.MAV_STATE_FLIGHT_TERMINATION:
             self.mav_state = 'MAV_STATE_FLIGHT_TERMINATION'
         else:
-            self.mav_state = 'MAV_STATE_UNINIT'
+            self.mav_state = 'MAV_STATE_UNINIT'     # catch all fallback in case state cannot be resolved
 
 
