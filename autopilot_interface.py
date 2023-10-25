@@ -110,6 +110,19 @@ class AutopilotInterface:
         # This is where the current state of the autopilot is auto updated
         self.connected_autopilot_state = None
 
+        # If we download the autopilot's mission via download_mission(), we also store it here:
+        self.current_mission = None
+
+        # Convenience dictionary for use with send_tune_to_autopilot
+        tunestrings = {'success': 'G8B',
+                       'error': 'BGBG',
+                       'off': 'E16D16C',
+                       'powerdown': 'B8A8G8F8E8D8C1',
+                       'bip': 'G16',
+                       'start': 'C8D8E8',
+                       'end': 'E8D8C8'
+                       }
+
         if autospawn_mavlink_handler:
             self.spawn_mavlink_handler(verbose=self._verbose_connection)
 
@@ -163,8 +176,7 @@ class AutopilotInterface:
 
     def arm(self, force=False, verbose=True):
 
-        if self.armed:
-            print('Vehicle already armed, not sending anything')
+        if self.connected_autopilot_state.armed:
             return None
 
         result = self._arm_disarm(arm=True, force=force, verbose=verbose)
@@ -329,7 +341,7 @@ class AutopilotInterface:
             return {'success': True, 'ack': ack}
         else:
             error_string = "%s: Expected %s got %s\nDescription:\n%s" % (
-                self.autopilot_mavlink_handler.name,
+                self.mavlink_handler.name,
                 mavutil.mavlink.enums["MAV_RESULT"][expected_result].name,
                 mavutil.mavlink.enums["MAV_RESULT"][ack.result].name,
                 mavutil.mavlink.enums["MAV_RESULT"][ack.result].description
@@ -424,6 +436,154 @@ class AutopilotInterface:
                 print(s)
             else:
                 logger.error(s)
+
+    def mission_request_list(self, mission_type=0, timeout_sec=5):
+        '''
+        Sends message of type MISSION_REQUEST_LIST and returns corresponding message of type MISSION_COUNT.
+        See:
+            https://mavlink.io/en/messages/common.html#MISSION_REQUEST_LIST
+            and
+            https://mavlink.io/en/messages/common.html#MISSION_COUNT
+
+        :param mission_type: (optional, default 0) see https://mavlink.io/en/messages/common.html#MAV_MISSION_TYPE
+        :param timeout_sec: timeout in seconds to wait for response, after which this method returns None
+        :return: the MISSION_COUNT message or None, if it has not been received after timeout_sec
+        '''
+
+        #
+
+        if self.connected_autopilot_sysid is None or self.connected_autopilot_compid is None:
+            return None
+
+        mission_request_list_message = self.mavlink_handler.connection.mav.mission_request_list_encode(
+            self.connected_autopilot_sysid, self.connected_autopilot_compid, mission_type=mission_type)
+
+        try:
+            return self.mavlink_handler.send_get_response(mission_request_list_message, 'MISSION_COUNT',
+                                                          timeout_sec=timeout_sec)
+        except TimeoutException:
+            return None
+
+    def request_mission_item_by_seq(self, seq, mission_type=0, timeout_sec=5):
+
+        mission_request_int_message = self.mavlink_handler.connection.mav.mission_request_int_encode(
+            self.connected_autopilot_sysid,
+            self.connected_autopilot_compid,
+            seq,
+            mission_type=mission_type)
+
+        try:
+            return self.mavlink_handler.send_get_response(mission_request_int_message, 'MISSION_ITEM_INT',
+                                                                  timeout_sec=timeout_sec)
+        except TimeoutException:
+            return None
+
+    def download_mission(self, mission_type=0, item_timeout_sec=60):
+        '''
+        Downloads a mission from the connected autopilot.
+        The downloaded mission is also automatically stored in self.current_mission
+
+        :param mission_type: (default 0), see https://mavlink.io/en/messages/common.html#MAV_MISSION_TYPE
+        :param item_timeout_sec: timeout in seconds to try getting each point
+        :return: a list of message objects returned by the autopilot or None, if a timeout is triggered
+        '''
+
+        # Start by getting the mission item count
+        mission_item_count = 0
+        t0 = time.time()
+        while True:
+
+            # check we have time remaining
+            t1 = time.time()
+            if t1 - t0 > item_timeout_sec:
+                raise TimeoutError
+
+            local_request_timeout = min(3, item_timeout_sec - (t1-t0))     # we will not wait beyond the item timeout
+            mlist = self.mission_request_list(timeout_sec=local_request_timeout)
+            try:
+                mission_item_count = mlist.count
+                break
+            except AttributeError:  # the list message not been received and got a None instead
+                continue
+
+        # Reaching here, we should have a valid mission item count
+
+        seq = 0
+        mission_list = [None] * mlist.count
+
+        # Fetch the mission items
+        t0 = time.time()
+        while True:
+
+            # check we have time remaining
+            t1 = time.time()
+            if t1-t0 > item_timeout_sec:
+                raise TimeoutError
+
+            local_request_timeout = min(3, item_timeout_sec - (t1 - t0))  # we will not wait beyond the outer timeout
+            item = self.request_mission_item_by_seq(seq, mission_type=mission_type, timeout_sec=local_request_timeout)
+            if item is None:
+                continue        # None means failure, loop around to try again till timeout
+
+            # Reaching here means we have a valid mission item for current value of seq
+            mission_list[seq] = item
+            if seq == mission_item_count - 1:
+                # Be nice and let the autopilot know everything is OK
+                self.mavlink_handler.connection.mav.mission_ack_send(self.connected_autopilot_sysid,
+                                                                     self.connected_autopilot_compid,
+                                                                     0, # SUCCESS
+                                                                     mission_type=mission_type)
+                self.current_mission = mission_list
+                return mission_list
+            else:
+                seq += 1
+                t0 = time.time()
+
+    def set_mission_current(self, mission_item_id):
+        # SET_MISSION_CURRENT id is 224: https://mavlink.io/en/messages/common.html#MAV_CMD_DO_SET_MISSION_CURRENT
+        result = self.run_command_long(224, [mission_item_id, 0, 0, 0, 0, 0, 0])
+
+    def MAV_CMD_to_id(self, mav_cmd_string):
+        '''Returns a numeric value given a MAV_CMD string representation or None if cannot be found.
+        MAV_CMD values are queried from the attributes of "mavutil.mavlink"
+
+        See:
+
+        https://mavlink.io/en/messages/common.html#mav_commands
+
+        '''
+
+        try:
+            getattr(mavutil.mavlink, mav_cmd_string)
+        except AttributeError:
+            return None
+
+    def MAV_CMD_from_id(self, mav_cmd_id):
+        '''Returns a string representation of a MAV_CMD, given a MAV_CMD id number or None if cannot be found.
+        MAV_CMD values are queried from the attributes of "mavutil.mavlink"
+
+        See:
+
+        https://mavlink.io/en/messages/common.html#mav_commands
+
+        '''
+        mav_cmd_strings = [cmd for cmd in mavutil.mavlink.__dict__.keys() if 'MAV_CMD' in cmd]
+        for mav_cmd_string in mav_cmd_strings:
+            try:
+                numeric_id = getattr(mavutil.mavlink, mav_cmd_string)
+                if numeric_id == mav_cmd_id:
+                    return mav_cmd_string
+            except AttributeError:
+                pass
+        return None
+
+
+
+
+
+
+
+
 
     # def send_success_tune_to_FCU(self, logger=None):
     #     self.send_tune_to_autopilot('G8B', logger=logger)
