@@ -541,7 +541,10 @@ class AutopilotInterface:
 
     def set_mission_current(self, mission_item_id):
         # SET_MISSION_CURRENT id is 224: https://mavlink.io/en/messages/common.html#MAV_CMD_DO_SET_MISSION_CURRENT
-        result = self.run_command_long(224, [mission_item_id, 0, 0, 0, 0, 0, 0])
+        try:
+            result = self.run_command_long(224, [mission_item_id, 0, 0, 0, 0, 0, 0])
+        except TimeoutException:
+            return None
 
     def MAV_CMD_to_id(self, mav_cmd_string):
         '''Returns a numeric value given a MAV_CMD string representation or None if cannot be found.
