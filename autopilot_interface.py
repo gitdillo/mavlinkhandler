@@ -580,13 +580,58 @@ class AutopilotInterface:
                 pass
         return None
 
+    def wait_for_GPS_fix(self, min_fix_type=2, timeout_seconds=10):
+        '''
+        Waits up to timeout_seconds for a GPS_RAW_INT message with fix_type > min_fix_type, upon whose receipt returns
+        True.
+        Returns False if such a message is not received within timeout_seconds.
 
+        CAUTION: If timeout_seconds is set to None, blocks indefinitely until an appropriate message is received.
+        '''
+        t0 = time.time()    # mark our entry time
+        while True:
+            # Check we have not overstayed in the method
+            if timeout_seconds is not None and time.time() - t0 >= timeout_seconds:
+                return False
 
+            # The following will return a message or None if it times out. We wait a max of timeout_seconds minus the
+            # time we have already spent i.e. timeout_seconds - (time.time() - t0). We also need to handle None
+            # timeout_seconds, which will throw TypeError if involved in arithmetic operations,
+            try:
+                to = timeout_seconds - (time.time() - t0)
+            except TypeError:
+                to = None
+            gps_msg = self.mavlink_handler.history.get_next_message(system_id=self.connected_autopilot_sysid,
+                                                                    component_id=self.connected_autopilot_compid,
+                                                                    message_type='GPS_RAW_INT', blocking=True,
+                                                                    timeout_sec=to)
 
+            if gps_msg is None:     # None indicates timeout
+                continue    # loop around, if we hit the method's timeout, it will be caught at the start of the loop
+            elif gps_msg.fix_type > min_fix_type:   # we got a message, check the fix
+                return True
+            else:           # there shouldn't be any other case but just in case, loop around
+                continue
 
-
-
-
+    def get_autopilot_time(self, timeout_seconds=10):
+        '''
+        Gets the autopilot Unix time as reported in field "time_unix_usec" of "SYSTEM_TIME" MAVLINK message
+        This field is in seconds
+        :param timeout_seconds: timeout for listening
+        :return: None, if nothing received before timeout, otherwise the "time_unix_usec" of first "SYSTEM_TIME" message
+        '''
+        # The following will return a valid message or None, if timeout is reached, we give it our own timeout
+        systime_msg = self.mavlink_handler.history.get_next_message(system_id=self.connected_autopilot_sysid,
+                                                                    component_id=self.connected_autopilot_compid,
+                                                                    message_type='SYSTEM_TIME', blocking=True,
+                                                                    timeout_sec=timeout_seconds)
+        if systime_msg is None: # if get_next_message() timed out, it will have returned None
+            return None
+        else:
+            try:
+                return systime_msg.time_unix_usec
+            except AttributeError:      # This shouldn't really happen but just to be on the safe side
+                return None
 
     # def send_success_tune_to_FCU(self, logger=None):
     #     self.send_tune_to_autopilot('G8B', logger=logger)
